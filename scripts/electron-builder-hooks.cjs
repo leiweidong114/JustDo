@@ -1244,6 +1244,9 @@ async function verifyPackagedOpenClawRuntime(context) {
   } else {
     verifyOpenClawPatchManifest(path.join(resourcesRoot, 'cfmind'), {
       expectedTarget: resolveOpenClawRuntimeTargetId(context),
+      // gateway.asar is a build-time source artifact. The packaged runtime
+      // intentionally ships the audited gateway bundle instead, on every OS.
+      allowOmittedGatewayAsar: true,
     });
   }
 
