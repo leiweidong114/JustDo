@@ -93,12 +93,14 @@ Main/Gateway 状态变化通过 `webContents.send` 到 preload listener。preloa
 Electron 单实例锁或创建窗口，而是通过用户私有的 named pipe/Unix socket 连接已运行的 Main。
 Main 校验随机令牌和命令白名单后，版本和普通配置探针仍调用兼容 CLI，Agent 发现直接投影
 JustDo 中已启用的 Agent；`agent` 请求则创建受管 Cowork session，通过与聊天窗口相同的
-router/Gateway 发送，并把最终回复编码成 Multica 兼容 stdout。会话列表、流式消息、thinking
-和 tool events 同时由正常 Cowork 事件链更新。
+router/Gateway 发送，并把最终回复编码成 Multica 兼容 stdout。评测器指定的 provider model
+在首轮发送前解析为 JustDo 已启用的唯一 provider/model，并通过 `sessions.patch` 形成会话级
+覆盖；解析或应用失败时中止运行，且不修改 main Agent 的永久模型。会话列表、流式消息、
+thinking 和 tool events 同时由正常 Cowork 事件链更新。
 
-Relay 只接受 Multica 工作目录以及 `OPENCLAW_CONFIG_PATH`、`OPENCLAW_INCLUDE_ROOTS` 两个
-环境覆盖。模型凭据、Gateway token、runtime 和 state directory 均由 Main 控制；JustDo 完全
-退出时 CLI 快速失败，不会自动启动桌面应用。
+Relay 只接受 Multica 工作目录以及显式白名单环境字段；其中
+`AGENT_EVAL_PROVIDER_MODEL` 仅用于选择会话模型，Gateway token、runtime 和 state directory
+均由 Main 控制。JustDo 完全退出时 CLI 快速失败，不会自动启动桌面应用。
 
 ## 4. Cowork IPC
 

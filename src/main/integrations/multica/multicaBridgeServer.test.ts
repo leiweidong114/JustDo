@@ -21,6 +21,7 @@ import {
   classifyMulticaRunStatus,
   MulticaBridgeServer,
   normalizeMulticaVersionProbeOutput,
+  resolveMulticaEvaluationModelRef,
 } from './multicaBridgeServer';
 
 const temporaryDirectories: string[] = [];
@@ -112,6 +113,37 @@ describe('MulticaBridgeServer', () => {
         resolved: true,
       }),
     ).toBe('completed');
+  });
+
+  test('resolves an evaluation model against enabled JustDo providers', async () => {
+    const Database = (await import('better-sqlite3')).default;
+    const db = new Database(':memory:');
+    db.exec(
+      'CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)',
+    );
+    db.prepare('INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?)').run(
+      'app_config',
+      JSON.stringify({
+        providers: {
+          litellm: {
+            enabled: true,
+            models: [{ id: 'glm-4.5-air', enabled: true }],
+          },
+        },
+      }),
+      Date.now(),
+    );
+    try {
+      expect(resolveMulticaEvaluationModelRef(db, 'glm-4.5-air')).toBe('litellm/glm-4.5-air');
+      expect(resolveMulticaEvaluationModelRef(db, 'litellm/glm-4.5-air')).toBe(
+        'litellm/glm-4.5-air',
+      );
+      expect(() => resolveMulticaEvaluationModelRef(db, 'missing')).toThrow(
+        'is not enabled in JustDo',
+      );
+    } finally {
+      db.close();
+    }
   });
 
   test('authenticates the pipe and preserves streamed output and exit codes', async () => {
@@ -256,7 +288,20 @@ describe('MulticaBridgeServer', () => {
         status TEXT, created_at INTEGER, updated_at INTEGER,
         PRIMARY KEY (source, external_session_key)
       );
+      CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
     `);
+    db.prepare('INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?)').run(
+      'app_config',
+      JSON.stringify({
+        providers: {
+          provider: {
+            enabled: true,
+            models: [{ id: 'glm-4.5-air', enabled: true }],
+          },
+        },
+      }),
+      Date.now(),
+    );
     const sessions = new Map<
       string,
       {
@@ -286,8 +331,15 @@ describe('MulticaBridgeServer', () => {
         modelName: 'provider/justdo-model',
       });
     });
+    const patchSessionModel = vi.fn(async () => ({
+      ok: true as const,
+      modelRef: 'provider/glm-4.5-air',
+      appliesTo: 'next-turn' as const,
+      source: 'gateway' as const,
+    }));
     const router = {
       startSession,
+      patchSessionModel,
       continueSession: vi.fn(),
       stopSession: vi.fn(),
       stopAllSessions: vi.fn(),
@@ -325,7 +377,7 @@ describe('MulticaBridgeServer', () => {
           'Use the staged skill',
         ],
         cwd: userDataPath,
-        env: {},
+        env: { AGENT_EVAL_PROVIDER_MODEL: 'glm-4.5-air' },
       });
       const stdout = responses
         .filter(response => response.type === 'stdout')
@@ -337,6 +389,11 @@ describe('MulticaBridgeServer', () => {
       };
 
       expect(buildCliEnvironment).not.toHaveBeenCalled();
+      expect(patchSessionModel).toHaveBeenCalledWith(
+        'cowork-visible-1',
+        'provider/glm-4.5-air',
+        'main',
+      );
       expect(startSession).toHaveBeenCalledWith(
         'cowork-visible-1',
         'Use the staged skill',

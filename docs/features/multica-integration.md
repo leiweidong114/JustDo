@@ -87,9 +87,11 @@ evaluator's `--agent-executable`.
 
 Use the evaluator's user-facing `--agent justdo` entry. It reuses Multica's OpenClaw-compatible
 backend internally, but that implementation detail does not belong in the command line. For JustDo,
-the evaluator's `--model` value is a JustDo Agent ID rather than a provider model name. Use `main` to
-evaluate JustDo's configured main Agent, or create another JustDo Agent with the desired model and
-skills and pass that Agent's ID. The backend emits
+the evaluator's `--model` retains its normal meaning: it is the provider model ID to evaluate. The
+model must already be enabled under exactly one JustDo provider; use a provider-qualified reference
+such as `litellm/glm-4.5-air` when the same model ID exists under multiple providers. The bridge
+applies it as a session-only model override before the first turn and fails closed if Gateway rejects
+the selection. The main Agent's permanent model configuration is not changed. The backend emits
 `agent --local --json --session-id ... --timeout ... --agent main --message ...`; the bridge sends
 that turn through the same Cowork router and Gateway path as the JustDo chat composer.
 
@@ -104,15 +106,18 @@ $justDoAgent = "$env:APPDATA\JustDo\multica\development\JustDo-agent.exe"
 & $justDoAgent agents list --json
 
 # 直接向 JustDo 的 main Agent 发起一个可见 Cowork 对话。
+$env:AGENT_EVAL_PROVIDER_MODEL = 'glm-4.5-air'
 & $justDoAgent agent --local --json `
   --session-id "multica-manual-$([guid]::NewGuid().ToString('N'))" `
   --timeout 180 `
   --agent main `
   --message "请使用当前工作区里的评测 skill 完成任务"
+Remove-Item Env:AGENT_EVAL_PROVIDER_MODEL
 ```
 
-这里的 `--agent main` 对应 Multica/agent-eval 的 `--model main`。如果需要指定另一个模型，
-先在 JustDo 的 Agent 页面创建一个绑定该模型的 Agent，再把 `main` 替换成那个 Agent 的 ID。
+这里的 `--agent main` 是兼容协议内部使用的 JustDo 主 Agent ID，不是模型名。评测 CLI 的
+`--model glm-4.5-air` 通过 `AGENT_EVAL_PROVIDER_MODEL` 传入，并只覆盖本次外部会话的模型。
+该模型必须先在 JustDo 中启用；模型 ID 跨 provider 重名时传入 `provider/model`。
 运行后，任务出现在 JustDo 会话列表的 `[Multica] ...` 条目中；打开该条目即可实时查看消息、
 thinking 和工具调用过程。
 
@@ -126,7 +131,7 @@ Set-Location D:\AI_FOR_WORLD\14_AI_workspace\common_tools\agent_eval_multca_skil
 .\backend\.runtime\windows\python\Scripts\agent-eval.exe run `
   --skill .\backend\skills\example-marker `
   --agent justdo `
-  --model main `
+  --model glm-4.5-air `
   --case .\backend\skills\example-marker\evals\cases\marker.yaml `
   --parallelism 1 `
   --iterations 1 `
@@ -147,7 +152,7 @@ cd /path/to/agent_eval_multca_skillup
 ./backend/.runtime/linux/python/bin/agent-eval run \
   --skill ./backend/skills/example-marker \
   --agent justdo \
-  --model main \
+  --model glm-4.5-air \
   --case ./backend/skills/example-marker/evals/cases/marker.yaml \
   --parallelism 1 \
   --iterations 1 \

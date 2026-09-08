@@ -1,3 +1,4 @@
+import type Database from 'better-sqlite3';
 import type { ChildProcess } from 'child_process';
 import { spawn } from 'child_process';
 import crypto from 'crypto';
@@ -52,6 +53,58 @@ const describeBridgeArgv = (
 export function normalizeMulticaVersionProbeOutput(stdout: string): string | null {
   const version = stdout.match(BUNDLED_RUNTIME_VERSION_PATTERN)?.[1];
   return version ? `${PRODUCT_NAME} ${version}\n` : null;
+}
+
+export function resolveMulticaEvaluationModelRef(
+  database: Database.Database,
+  requestedModel: string,
+): string {
+  const normalized = requestedModel.trim();
+  if (!normalized) throw new Error('The evaluation model is empty.');
+
+  const row = database.prepare("SELECT value FROM kv WHERE key = 'app_config'").get() as
+    { value?: string } | undefined;
+  let config: Record<string, unknown> = {};
+  try {
+    config = row?.value ? (JSON.parse(row.value) as Record<string, unknown>) : {};
+  } catch {
+    throw new Error('JustDo model configuration is invalid.');
+  }
+  const providers =
+    config.providers && typeof config.providers === 'object' && !Array.isArray(config.providers)
+      ? (config.providers as Record<string, unknown>)
+      : {};
+  const enabledModelRefs: string[] = [];
+  for (const [providerId, candidate] of Object.entries(providers)) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const provider = candidate as { enabled?: boolean; models?: unknown[] };
+    if (provider.enabled === false || !Array.isArray(provider.models)) continue;
+    for (const model of provider.models) {
+      if (!model || typeof model !== 'object' || Array.isArray(model)) continue;
+      const entry = model as { id?: unknown; enabled?: boolean };
+      if (entry.enabled !== false && typeof entry.id === 'string' && entry.id.trim()) {
+        enabledModelRefs.push(`${providerId}/${entry.id.trim()}`);
+      }
+    }
+  }
+  if (normalized.includes('/')) {
+    if (enabledModelRefs.includes(normalized)) return normalized;
+    throw new Error(
+      `Model "${normalized}" is not enabled in JustDo. Configure it in JustDo before running the evaluation.`,
+    );
+  }
+  const matches = enabledModelRefs.filter(
+    modelRef => modelRef.slice(modelRef.indexOf('/') + 1) === normalized,
+  );
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) {
+    throw new Error(
+      `Model "${normalized}" is not enabled in JustDo. Configure it in JustDo before running the evaluation.`,
+    );
+  }
+  throw new Error(
+    `Model "${normalized}" exists under multiple JustDo providers. Pass a provider-qualified model such as "${matches[0]}".`,
+  );
 }
 
 export const classifyMulticaRunStatus = (input: {
@@ -298,7 +351,8 @@ export class MulticaBridgeServer {
         return null;
       }
       if (argv[0] === 'agent') {
-        await this.runCoworkAgentRequest(argv, cwd, socket);
+        const requestEnvironment = sanitizeMulticaBridgeEnvironment(request.env || {});
+        await this.runCoworkAgentRequest(argv, cwd, requestEnvironment, socket);
         return null;
       }
       const cli = await engineManager.buildCliEnvironment();
@@ -419,6 +473,7 @@ export class MulticaBridgeServer {
   private async runCoworkAgentRequest(
     argv: string[],
     cwd: string,
+    env: Record<string, string>,
     socket: net.Socket,
   ): Promise<void> {
     const promptIndex = argv.indexOf('--message');
@@ -481,6 +536,23 @@ export class MulticaBridgeServer {
     });
 
     try {
+      const requestedModel = env.AGENT_EVAL_PROVIDER_MODEL?.trim();
+      if (requestedModel) {
+        const modelRef = resolveMulticaEvaluationModelRef(
+          this.options.getDatabase(),
+          requestedModel,
+        );
+        const modelResult = await router.patchSessionModel(
+          binding.coworkSessionId,
+          modelRef,
+          agentId,
+        );
+        if ('error' in modelResult) {
+          throw new Error(
+            `JustDo could not apply evaluation model "${requestedModel}": ${modelResult.error}`,
+          );
+        }
+      }
       const runPromise = binding.created
         ? router.startSession(binding.coworkSessionId, prompt, {
             skillIds,

@@ -79,6 +79,7 @@ export function sanitizeMulticaBridgeEnvironment(env: NodeJS.ProcessEnv): Record
     'OPENCLAW_CONFIG_PATH',
     'OPENCLAW_INCLUDE_ROOTS',
     'LITELLM_API_KEY',
+    'AGENT_EVAL_PROVIDER_MODEL',
   ] as const) {
     const value = env[name]?.trim();
     if (value && !hasLineBreak(value)) result[name] = value;
