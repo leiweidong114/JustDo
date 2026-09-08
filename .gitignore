@@ -1,5 +1,7 @@
 /build/
 release/
+release-linux/
+release-windows/
 node_modules
 dist
 dist-electron
