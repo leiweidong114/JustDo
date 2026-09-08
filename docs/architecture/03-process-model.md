@@ -91,8 +91,10 @@ Main/Gateway 状态变化通过 `webContents.send` 到 preload listener。preloa
 私有的 launcher，通过 Node Electron CLI 启动当前源码入口并附加内部 bridge 标记。匹配到受
 支持的 `--version`、`config`、`agents` 或 `agent --local --json` 参数时，辅助进程不申请
 Electron 单实例锁或创建窗口，而是通过用户私有的 named pipe/Unix socket 连接已运行的 Main。
-Main 校验随机令牌和命令白名单后，使用自身 OpenClaw 环境启动捆绑 runtime，并把 stdout、
-stderr、退出码及取消信号传回辅助进程。
+Main 校验随机令牌和命令白名单后，版本和普通配置探针仍调用兼容 CLI，Agent 发现直接投影
+JustDo 中已启用的 Agent；`agent` 请求则创建受管 Cowork session，通过与聊天窗口相同的
+router/Gateway 发送，并把最终回复编码成 Multica 兼容 stdout。会话列表、流式消息、thinking
+和 tool events 同时由正常 Cowork 事件链更新。
 
 Relay 只接受 Multica 工作目录以及 `OPENCLAW_CONFIG_PATH`、`OPENCLAW_INCLUDE_ROOTS` 两个
 环境覆盖。模型凭据、Gateway token、runtime 和 state directory 均由 Main 控制；JustDo 完全
@@ -243,9 +245,10 @@ Handler 在获得 single-instance lock 后统一注册。它们使用 getter 延
 
 ### 独立 Multica CLI 主进程
 
-评测器携带 `OPENCLAW_CONFIG_PATH` 启动 `--justdo-multica-bridge` 时，主进程不创建桌面窗口，
-初始化原有 store、EngineManager 和会话数据库，通过每次运行独立的认证 relay 完成调用。
-它不覆盖正在运行的桌面 relay 元数据，也不改变鉴权协议。
+launcher 先检查并连接正在运行的桌面 relay。没有桌面 relay 时，主进程不创建窗口，初始化
+原有 store、EngineManager、Cowork router 和会话数据库，通过每次运行独立的认证 relay 完成
+调用；评测器携带的 `OPENCLAW_CONFIG_PATH` 不覆盖 JustDo 自己的 Agent 配置。它不覆盖桌面
+relay 元数据，也不改变鉴权协议。
 实现见 `multicaStandalone.ts`，迁移和构建步骤见 [无桌面 CLI](../features/multica-headless-cli.md)。
 
 新增接口完成时必须有稳定 channel 常量、运行时输入验证、明确 result/error contract、最小 preload 方法、Renderer declaration、销毁/取消语义和至少一个失败测试。涉及 Gateway 的接口还要定义 starting/disconnected/reconnecting 时行为；涉及写入的接口要定义重复调用和部分失败。

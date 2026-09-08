@@ -31,6 +31,7 @@ describe('Multica external sessions', () => {
         sessions.set(session.id, session);
         return session;
       },
+      getAgent: () => ({ model: 'provider/model' }),
       updateSession: () => undefined,
     } as unknown as CoworkStore;
     const store = new MulticaExternalSessionStore(db, coworkStore);
@@ -48,7 +49,7 @@ describe('Multica external sessions', () => {
 
     expect(first.binding.coworkSessionId).toBe(resumed.binding.coworkSessionId);
     expect(first.binding.openclawSessionKey).toBe(resumed.binding.openclawSessionKey);
-    expect(first.binding.openclawSessionKey).toMatch(/^[a-z0-9:_-]+$/);
+    expect(first.binding.openclawSessionKey).toBe('agent:main:justdo:session-1');
     expect(resumed.argv).toContain(first.binding.openclawSessionKey);
   });
 
@@ -68,6 +69,7 @@ describe('Multica external sessions', () => {
     `);
     const coworkStore = {
       createSession: () => ({ id: 'unexpected' }),
+      getAgent: () => ({ model: 'provider/model' }),
       updateSession: () => undefined,
     } as unknown as CoworkStore;
     const store = new MulticaExternalSessionStore(db, coworkStore);
@@ -100,7 +102,7 @@ describe('Multica external sessions', () => {
     ).toBe('agent:main:recovered');
   });
 
-  test('lets an unknown runtime id resolve before binding its discovered session key', () => {
+  test('maps an unknown runtime id directly to a managed JustDo session key', () => {
     db = new Database(':memory:');
     db.exec(`
       CREATE TABLE cowork_external_sessions (
@@ -112,6 +114,7 @@ describe('Multica external sessions', () => {
     `);
     const coworkStore = {
       createSession: () => ({ id: 'recovered-local-session' }),
+      getAgent: () => ({ model: 'provider/model' }),
       updateSession: () => undefined,
     } as unknown as CoworkStore;
     const store = new MulticaExternalSessionStore(db, coworkStore);
@@ -120,11 +123,15 @@ describe('Multica external sessions', () => {
       store,
       'C:\\工作区',
     )!;
-    expect(first.argv).toContain('--session-id');
-    expect(first.binding.openclawSessionKey).toBeNull();
+    expect(first.argv).toContain('--session-key');
+    expect(first.binding.openclawSessionKey).toBe('agent:main:justdo:recovered-local-session');
 
     store.updateRun(first.binding, 'completed', 'unknown-runtime-id', 'agent:main:resolved');
-    const resumed = rewriteMulticaAgentSessionArgs(first.argv, store, 'C:\\工作区')!;
+    const resumed = rewriteMulticaAgentSessionArgs(
+      ['agent', '--local', '--json', '--session-id', 'unknown-runtime-id', '--message', 'again'],
+      store,
+      'C:\\工作区',
+    )!;
     expect(resumed.argv).toContain('--session-key');
     expect(resumed.argv).toContain('agent:main:resolved');
   });

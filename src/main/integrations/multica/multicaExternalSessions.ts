@@ -1,9 +1,10 @@
 import type Database from 'better-sqlite3';
-import crypto from 'crypto';
 import path from 'path';
 
 import type { ExternalSessionStatus } from '../../../shared/multica';
+import { DEFAULT_PERMISSION_MODE } from '../../../shared/openclaw/approvals';
 import type { CoworkStore } from '../../data/coworkStore';
+import { buildManagedSessionKey } from '../../openclaw/sessions/openclawChannelSessionSync';
 
 export interface MulticaExternalSessionBinding {
   externalSessionKey: string;
@@ -12,6 +13,7 @@ export interface MulticaExternalSessionBinding {
   openclawSessionKey: string | null;
   cwd: string;
   status: ExternalSessionStatus;
+  created: boolean;
 }
 
 interface BindingRow {
@@ -30,20 +32,11 @@ const mapBinding = (row: BindingRow): MulticaExternalSessionBinding => ({
   openclawSessionKey: row.openclaw_session_key,
   cwd: row.cwd,
   status: row.status,
+  created: false,
 });
 
 const statusToCoworkStatus = (status: ExternalSessionStatus): 'running' | 'completed' | 'error' =>
   status === 'running' ? 'running' : status === 'completed' ? 'completed' : 'error';
-
-const buildOpenClawSessionKey = (agentId: string, externalSessionKey: string): string => {
-  const digest = crypto
-    .createHash('sha256')
-    .update(`${agentId}\0${externalSessionKey}`)
-    .digest('base64url')
-    .slice(0, 24)
-    .toLowerCase();
-  return `agent:${agentId}:multica:${digest}`.toLowerCase();
-};
 
 const canonicalizeOpenClawSessionKey = (value: string | null): string | null => {
   const normalized = value?.trim().toLowerCase();
@@ -89,6 +82,7 @@ export class MulticaExternalSessionStore {
     cwd: string;
     agentId: string;
     initialMulticaSession: boolean;
+    activeSkillIds?: string[];
   }): MulticaExternalSessionBinding {
     const existing = this.findByExternalOrRuntimeId(input.requestedSessionId);
     if (existing) {
@@ -107,18 +101,22 @@ export class MulticaExternalSessionStore {
     }
 
     const externalSessionKey = input.requestedSessionId;
-    const openclawSessionKey = input.initialMulticaSession
-      ? buildOpenClawSessionKey(input.agentId, externalSessionKey)
-      : null;
-    const openclawSessionId = input.initialMulticaSession ? null : input.requestedSessionId;
     const folderName = path.basename(path.resolve(input.cwd)) || input.cwd;
+    const modelRef = this.coworkStore.getAgent(input.agentId)?.model.trim() || undefined;
     const session = this.coworkStore.createSession(
       `[Multica] ${folderName}`,
       input.cwd,
       'local',
-      [],
+      input.activeSkillIds ?? [],
       input.agentId,
+      DEFAULT_PERMISSION_MODE,
+      modelRef,
     );
+    // External evaluations now use the same managed session namespace as a
+    // conversation started in JustDo. This lets the normal Cowork runtime and
+    // the chat window observe one authoritative Gateway transcript.
+    const openclawSessionKey = buildManagedSessionKey(session.id, input.agentId);
+    const openclawSessionId = input.initialMulticaSession ? null : input.requestedSessionId;
     const now = Date.now();
     this.db
       .prepare(
@@ -144,6 +142,7 @@ export class MulticaExternalSessionStore {
       openclawSessionKey,
       cwd: input.cwd,
       status: 'running',
+      created: true,
     };
   }
 
@@ -179,6 +178,7 @@ export function rewriteMulticaAgentSessionArgs(
   argv: readonly string[],
   store: MulticaExternalSessionStore,
   cwd: string,
+  activeSkillIds: string[] = [],
 ): { argv: string[]; binding: MulticaExternalSessionBinding } | null {
   if (argv[0] !== 'agent') return null;
   const sessionIdIndex = argv.indexOf('--session-id');
@@ -196,6 +196,7 @@ export function rewriteMulticaAgentSessionArgs(
     cwd,
     agentId,
     initialMulticaSession,
+    activeSkillIds,
   });
   const rewritten = [...argv];
   if (binding.openclawSessionKey) {

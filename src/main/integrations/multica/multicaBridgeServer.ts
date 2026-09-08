@@ -8,7 +8,9 @@ import path from 'path';
 import type { ExternalSessionStatus } from '../../../shared/multica';
 import { PRODUCT_NAME } from '../../../shared/productMetadata';
 import type { CoworkStore } from '../../data/coworkStore';
+import type { CoworkEngineRouter } from '../../engine/cowork/coworkEngineRouter';
 import type { OpenClawEngineManager } from '../../openclaw/runtime/openclawEngineManager';
+import { buildManagedSessionKey } from '../../openclaw/sessions/openclawChannelSessionSync';
 import {
   decodeBridgeLines,
   encodeBridgeMessage,
@@ -22,17 +24,10 @@ import {
   sanitizeMulticaBridgeEnvironment,
 } from './multicaBridgeProtocol';
 import {
-  extractOpenClawSessionId,
-  extractOpenClawSessionKey,
-  type MulticaExternalSessionBinding,
   MulticaExternalSessionStore,
   rewriteMulticaAgentSessionArgs,
 } from './multicaExternalSessions';
-import {
-  getMulticaModelDiscoveryKind,
-  MULTICA_MODEL_CATALOG_ARGV,
-  projectMulticaModelCatalog,
-} from './multicaModelProjection';
+import { getMulticaModelDiscoveryKind, projectMulticaAgentCatalog } from './multicaModelProjection';
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_STDOUT_CAPTURE_BYTES = 4 * 1024 * 1024;
@@ -83,59 +78,12 @@ const readTimeoutMs = (argv: readonly string[]): number | null => {
   return Math.min(seconds * 1_000 + OPENCLAW_TIMEOUT_GRACE_MS, 2_147_483_647);
 };
 
-interface MulticaWorkspaceConfig {
-  configPath: string;
-  dispose: () => void;
-}
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-
-export function createMulticaWorkspaceConfig(input: {
-  sourceConfigPath: string | undefined;
-  cwd: string;
-  argv: readonly string[];
-  userDataPath: string;
-}): MulticaWorkspaceConfig | null {
-  const sourceConfigPath = input.sourceConfigPath?.trim();
-  if (!sourceConfigPath) return null;
-  const source = JSON.parse(fs.readFileSync(sourceConfigPath, 'utf8')) as unknown;
-  if (!isRecord(source)) throw new Error('The evaluation OpenClaw config must be an object.');
-
-  const config = structuredClone(source);
-  const agents = isRecord(config.agents) ? config.agents : {};
-  config.agents = agents;
-  const defaults = isRecord(agents.defaults) ? agents.defaults : {};
-  agents.defaults = { ...defaults, workspace: input.cwd };
-
-  const agentIndex = input.argv.indexOf('--agent');
-  const selectedAgent = agentIndex >= 0 ? input.argv[agentIndex + 1]?.trim() : '';
-  if (selectedAgent && Array.isArray(agents.list)) {
-    agents.list = agents.list.map(value =>
-      isRecord(value) && value.id === selectedAgent ? { ...value, workspace: input.cwd } : value,
-    );
-  }
-
-  const bridgeDirectory = path.join(input.userDataPath, 'multica');
-  fs.mkdirSync(bridgeDirectory, { recursive: true, mode: 0o700 });
-  const directory = fs.mkdtempSync(path.join(bridgeDirectory, 'evaluation-config-'));
-  const configPath = path.join(directory, 'openclaw.json');
-  fs.writeFileSync(configPath, JSON.stringify(config), { encoding: 'utf8', mode: 0o600 });
-  let disposed = false;
-  return {
-    configPath,
-    dispose: () => {
-      if (disposed) return;
-      disposed = true;
-      fs.rmSync(directory, { force: true, recursive: true });
-    },
-  };
-}
-
 export interface MulticaBridgeServerOptions {
   userDataPath: string;
   getEngineManager: () => OpenClawEngineManager;
   getCoworkStore: () => CoworkStore;
+  getCoworkEngineRouter: () => CoworkEngineRouter;
+  ensureCoworkRuntime: () => Promise<{ phase: string; message?: string }>;
   getDatabase: () => import('better-sqlite3').Database;
   onSessionsChanged: () => void;
 }
@@ -165,6 +113,7 @@ const terminateProcessTree = (child: ChildProcess): void => {
 export class MulticaBridgeServer {
   private server: net.Server | null = null;
   private readonly children = new Set<ChildProcess>();
+  private readonly activeCoworkSessions = new Set<string>();
   private token = '';
 
   constructor(private readonly options: MulticaBridgeServerOptions) {}
@@ -231,6 +180,12 @@ export class MulticaBridgeServer {
     this.server = null;
     for (const child of this.children) terminateProcessTree(child);
     this.children.clear();
+    await Promise.allSettled(
+      [...this.activeCoworkSessions].map(sessionId =>
+        this.options.getCoworkEngineRouter().stopSession(sessionId, { bestEffort: true }),
+      ),
+    );
+    this.activeCoworkSessions.clear();
     if (server) {
       await new Promise<void>(resolve => server.close(() => resolve()));
     }
@@ -303,7 +258,6 @@ export class MulticaBridgeServer {
       return null;
     }
 
-    let workspaceConfig: MulticaWorkspaceConfig | null = null;
     try {
       const requestSummary = describeBridgeArgv(request.argv);
       console.info(`${LOG_PREFIX} Request accepted.`, requestSummary);
@@ -311,7 +265,7 @@ export class MulticaBridgeServer {
       if (!fs.statSync(cwd).isDirectory())
         throw new Error('The requested working directory is invalid.');
       const engineManager = this.options.getEngineManager();
-      let argv = [...request.argv];
+      const argv = [...request.argv];
       const versionProbe = argv.length === 1 && argv[0] === '--version';
       const runtimeVersion = versionProbe ? engineManager.getStatus().version : null;
       if (runtimeVersion) {
@@ -329,23 +283,26 @@ export class MulticaBridgeServer {
         });
         return null;
       }
-      const cli = await engineManager.buildCliEnvironment();
       const modelDiscoveryKind = getMulticaModelDiscoveryKind(argv);
-      const bufferedProbe = versionProbe || Boolean(modelDiscoveryKind);
-      let binding: MulticaExternalSessionBinding | null = null;
-      if (argv[0] === 'agent') {
-        const externalStore = new MulticaExternalSessionStore(
-          this.options.getDatabase(),
-          this.options.getCoworkStore(),
+      if (modelDiscoveryKind) {
+        const output = projectMulticaAgentCatalog(
+          this.options.getCoworkStore().listAgents(),
+          modelDiscoveryKind,
         );
-        const rewritten = rewriteMulticaAgentSessionArgs(argv, externalStore, cwd);
-        if (rewritten) {
-          argv = rewritten.argv;
-          binding = rewritten.binding;
-          externalStore.updateRun(binding, 'running');
-          this.options.onSessionsChanged();
-        }
+        writeResponse(socket, {
+          type: 'stdout',
+          data: Buffer.from(output, 'utf8').toString('base64'),
+        });
+        writeResponse(socket, { type: 'exit', code: 0 });
+        socket.end();
+        return null;
       }
+      if (argv[0] === 'agent') {
+        await this.runCoworkAgentRequest(argv, cwd, socket);
+        return null;
+      }
+      const cli = await engineManager.buildCliEnvironment();
+      const bufferedProbe = versionProbe;
 
       const requestEnvironment = sanitizeMulticaBridgeEnvironment(request.env || {});
       const env: NodeJS.ProcessEnv = {
@@ -353,26 +310,8 @@ export class MulticaBridgeServer {
         ...requestEnvironment,
         ELECTRON_RUN_AS_NODE: '1',
       };
-      if (argv[0] === 'agent') {
-        workspaceConfig = createMulticaWorkspaceConfig({
-          sourceConfigPath: requestEnvironment.OPENCLAW_CONFIG_PATH,
-          cwd,
-          argv,
-          userDataPath: this.options.userDataPath,
-        });
-        if (workspaceConfig) env.OPENCLAW_CONFIG_PATH = workspaceConfig.configPath;
-        const includeRoots = new Set(
-          (env.OPENCLAW_INCLUDE_ROOTS || '')
-            .split(path.delimiter)
-            .map(value => value.trim())
-            .filter(Boolean),
-        );
-        includeRoots.add(cwd);
-        env.OPENCLAW_INCLUDE_ROOTS = [...includeRoots].join(path.delimiter);
-      }
       const executable = env.JUSTDO_ELECTRON_PATH || process.execPath;
-      const runtimeArgv = modelDiscoveryKind ? [...MULTICA_MODEL_CATALOG_ARGV] : argv;
-      const child = spawn(executable, [cli.openclawEntry, ...runtimeArgv], {
+      const child = spawn(executable, [cli.openclawEntry, ...argv], {
         cwd,
         env,
         detached: process.platform !== 'win32',
@@ -419,7 +358,6 @@ export class MulticaBridgeServer {
         }
       });
       child.once('error', error => {
-        workspaceConfig?.dispose();
         console.warn(`${LOG_PREFIX} Runtime process failed to start.`, {
           command: requestSummary.command,
           category: error.name,
@@ -427,7 +365,6 @@ export class MulticaBridgeServer {
         writeResponse(socket, { type: 'error', message: error.message });
       });
       child.once('exit', (code, signal) => {
-        workspaceConfig?.dispose();
         if (timeoutTimer) clearTimeout(timeoutTimer);
         this.children.delete(child);
         let responseCode = typeof code === 'number' ? code : signal ? 130 : 1;
@@ -446,44 +383,6 @@ export class MulticaBridgeServer {
               data: stderrCapture.toString('base64'),
             });
           }
-        } else if (modelDiscoveryKind && code === 0) {
-          const projected = projectMulticaModelCatalog(
-            stdoutCapture.toString('utf8'),
-            modelDiscoveryKind,
-          );
-          if (projected === null) {
-            responseCode = 1;
-            writeResponse(socket, {
-              type: 'stderr',
-              data: Buffer.from(
-                `${PRODUCT_NAME} could not read the configured model catalog.\n`,
-                'utf8',
-              ).toString('base64'),
-            });
-          } else {
-            writeResponse(socket, {
-              type: 'stdout',
-              data: Buffer.from(projected, 'utf8').toString('base64'),
-            });
-          }
-        }
-        if (binding) {
-          const externalStore = new MulticaExternalSessionStore(
-            this.options.getDatabase(),
-            this.options.getCoworkStore(),
-          );
-          const openclawSessionId = extractOpenClawSessionId(stdoutCapture.toString('utf8'));
-          const openclawSessionKey = extractOpenClawSessionKey(stdoutCapture.toString('utf8'));
-          const resolved = Boolean(binding.openclawSessionKey || openclawSessionKey);
-          const status = classifyMulticaRunStatus({
-            code,
-            signal,
-            timedOut,
-            stderr: stderrCapture.toString('utf8'),
-            resolved,
-          });
-          externalStore.updateRun(binding, status, openclawSessionId, openclawSessionKey);
-          this.options.onSessionsChanged();
         }
         console.info(`${LOG_PREFIX} Runtime process finished.`, {
           command: requestSummary.command,
@@ -502,7 +401,6 @@ export class MulticaBridgeServer {
       });
       return child;
     } catch (error) {
-      workspaceConfig?.dispose();
       console.warn(`${LOG_PREFIX} Request failed before runtime completion.`, {
         category: error instanceof Error ? error.name : 'UNKNOWN_ERROR',
       });
@@ -515,6 +413,145 @@ export class MulticaBridgeServer {
       });
       socket.end();
       return null;
+    }
+  }
+
+  private async runCoworkAgentRequest(
+    argv: string[],
+    cwd: string,
+    socket: net.Socket,
+  ): Promise<void> {
+    const promptIndex = argv.indexOf('--message');
+    const prompt = promptIndex >= 0 ? (argv[promptIndex + 1] ?? '') : '';
+    if (!prompt.trim()) throw new Error('Multica agent request is missing a message.');
+
+    const agentIndex = argv.indexOf('--agent');
+    const agentId = agentIndex >= 0 ? argv[agentIndex + 1]?.trim() || 'main' : 'main';
+    const store = this.options.getCoworkStore();
+    const agent = store.getAgent(agentId);
+    if (!agent) {
+      throw new Error(
+        `JustDo Agent "${agentId}" was not found. Configure that Agent in JustDo and pass its ID as Multica's model.`,
+      );
+    }
+
+    const runtimeStatus = await this.options.ensureCoworkRuntime();
+    if (runtimeStatus.phase !== 'running') {
+      throw new Error(runtimeStatus.message || 'JustDo Cowork runtime is not ready.');
+    }
+
+    const skillIds = this.discoverWorkspaceSkillIds(cwd);
+    const externalStore = new MulticaExternalSessionStore(this.options.getDatabase(), store);
+    const rewritten = rewriteMulticaAgentSessionArgs(argv, externalStore, cwd, skillIds);
+    if (!rewritten)
+      throw new Error('Multica agent request could not be mapped to a JustDo session.');
+    const binding = rewritten.binding;
+    const sessionKey = buildManagedSessionKey(binding.coworkSessionId, agentId);
+    externalStore.updateRun(binding, 'running', binding.coworkSessionId, sessionKey);
+    this.options.onSessionsChanged();
+
+    const router = this.options.getCoworkEngineRouter();
+    const messageCountBeforeRun = store.getSession(binding.coworkSessionId)?.messages.length ?? 0;
+    const startedAt = Date.now();
+    let timedOut = false;
+    let disconnected = socket.destroyed;
+    const stopSession = (): void => {
+      void router
+        .stopSession(binding.coworkSessionId, { bestEffort: true })
+        .catch((): void => undefined);
+    };
+    const onSocketClose = (): void => {
+      disconnected = true;
+      stopSession();
+    };
+    socket.once('close', onSocketClose);
+    this.activeCoworkSessions.add(binding.coworkSessionId);
+
+    const timeoutMs = readTimeoutMs(argv);
+    let timeoutTimer: NodeJS.Timeout | null = null;
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      if (!timeoutMs) return;
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        stopSession();
+        reject(
+          new Error(`JustDo agent timed out after ${timeoutMs - OPENCLAW_TIMEOUT_GRACE_MS} ms.`),
+        );
+      }, timeoutMs);
+    });
+
+    try {
+      const runPromise = binding.created
+        ? router.startSession(binding.coworkSessionId, prompt, {
+            skillIds,
+            confirmationMode: 'modal',
+            workspaceRoot: cwd,
+            agentId,
+          })
+        : router.continueSession(binding.coworkSessionId, prompt, { skillIds });
+      await (timeoutMs ? Promise.race([runPromise, timeoutPromise]) : runPromise);
+      if (disconnected) throw new Error('Multica client disconnected from the JustDo session.');
+
+      const session = store.getSession(binding.coworkSessionId);
+      const assistant = session?.messages
+        .slice(messageCountBeforeRun)
+        .filter(message => message.type === 'assistant' && message.content.trim())
+        .at(-1);
+      if (!assistant) throw new Error('JustDo completed without an assistant response.');
+
+      const result = {
+        payloads: [{ text: assistant.content }],
+        meta: {
+          durationMs: Date.now() - startedAt,
+          agentMeta: {
+            sessionId: binding.coworkSessionId,
+            sessionKey,
+            model: assistant.modelName || agent.model,
+          },
+        },
+      };
+      writeResponse(socket, {
+        type: 'stdout',
+        data: Buffer.from(`${JSON.stringify(result)}\n`, 'utf8').toString('base64'),
+      });
+      externalStore.updateRun(binding, 'completed', binding.coworkSessionId, sessionKey);
+      writeResponse(socket, { type: 'exit', code: 0 });
+      socket.end();
+    } catch (error) {
+      if (timedOut || disconnected) {
+        await router
+          .stopSession(binding.coworkSessionId, { bestEffort: true })
+          .catch((): void => undefined);
+      }
+      externalStore.updateRun(
+        binding,
+        timedOut ? 'timeout' : disconnected ? 'cancelled' : 'error',
+        binding.coworkSessionId,
+        sessionKey,
+      );
+      throw error;
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      socket.off('close', onSocketClose);
+      this.activeCoworkSessions.delete(binding.coworkSessionId);
+      this.options.onSessionsChanged();
+    }
+  }
+
+  private discoverWorkspaceSkillIds(cwd: string): string[] {
+    const skillsDirectory = path.join(cwd, 'skills');
+    try {
+      return fs
+        .readdirSync(skillsDirectory, { withFileTypes: true })
+        .filter(
+          entry =>
+            entry.isDirectory() &&
+            fs.existsSync(path.join(skillsDirectory, entry.name, 'SKILL.md')),
+        )
+        .map(entry => entry.name)
+        .sort();
+    } catch {
+      return [];
     }
   }
 }

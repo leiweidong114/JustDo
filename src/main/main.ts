@@ -54,6 +54,7 @@ import { CoworkEngineService } from './engine';
 import { bindCoworkRuntimeForwarder } from './engine/cowork/coworkRuntimeForwarder';
 import { runMulticaBridgeClient } from './integrations/multica/multicaBridgeClient';
 import {
+  MULTICA_BRIDGE_METADATA_FILE,
   MULTICA_DEV_BRIDGE_SWITCH,
   parseMulticaBridgeArgv,
 } from './integrations/multica/multicaBridgeProtocol';
@@ -821,29 +822,53 @@ const scheduleReload = (reason: string, webContents?: WebContents) => {
 // CLI relay processes do not participate in Electron's single-instance lock.
 const gotTheLock = multicaBridgeArgv ? true : app.requestSingleInstanceLock();
 if (multicaBridgeArgv) {
-  // Evaluation supplies an isolated model configuration. Start the normal local
-  // runtime on demand without depending on a desktop window or its instance lock.
+  // Prefer the desktop relay even when the evaluator supplies an OpenClaw config.
+  // Agent turns must use JustDo's own Cowork configuration and visible session.
   const runBridge = async (): Promise<number> => {
-    if (!process.env.OPENCLAW_CONFIG_PATH && multicaBridgeArgv[0] !== '--version') {
+    const desktopMetadataPath = path.join(
+      app.getPath('userData'),
+      'multica',
+      MULTICA_BRIDGE_METADATA_FILE,
+    );
+    if (fs.existsSync(desktopMetadataPath)) {
       return runMulticaBridgeClient(app.getPath('userData'), multicaBridgeArgv);
     }
     await app.whenReady();
     store = await initStore();
-    return runMulticaStandalone({
-      userDataPath: app.getPath('userData'),
-      getEngineManager: getOpenClawEngineManager,
-      getCoworkStore,
-      getDatabase: () => getStore().getDatabase(),
-      onSessionsChanged: () => undefined,
-    }, multicaBridgeArgv);
+    setStoreGetter(() => store);
+    try {
+      return await runMulticaStandalone(
+        {
+          userDataPath: app.getPath('userData'),
+          getEngineManager: getOpenClawEngineManager,
+          getCoworkStore,
+          getCoworkEngineRouter,
+          ensureCoworkRuntime: ensureOpenClawRunningForCowork,
+          getDatabase: () => getStore().getDatabase(),
+          onSessionsChanged: () => undefined,
+        },
+        multicaBridgeArgv,
+      );
+    } finally {
+      await getCoworkEngineRouter()
+        .stopAllSessions()
+        .catch((): void => undefined);
+      await getOpenClawEngineManager()
+        .stopGateway()
+        .catch((): void => undefined);
+    }
   };
-  void runBridge().catch(error => {
-    process.stderr.write(`CLI runtime failed: ${error instanceof Error ? error.message : String(error)}\n`);
-    return 70;
-  }).then(code => {
-    process.exitCode = code;
-    setImmediate(() => app.exit(code));
-  });
+  void runBridge()
+    .catch(error => {
+      process.stderr.write(
+        `CLI runtime failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      return 70;
+    })
+    .then(code => {
+      process.exitCode = code;
+      setImmediate(() => app.exit(code));
+    });
 } else if (!gotTheLock) {
   app.quit();
 } else {
@@ -1275,6 +1300,8 @@ if (multicaBridgeArgv) {
       userDataPath: app.getPath('userData'),
       getEngineManager: getOpenClawEngineManager,
       getCoworkStore,
+      getCoworkEngineRouter,
+      ensureCoworkRuntime: ensureOpenClawRunningForCowork,
       getDatabase: () => getStore().getDatabase(),
       onSessionsChanged: () => {
         for (const window of BrowserWindow.getAllWindows()) {

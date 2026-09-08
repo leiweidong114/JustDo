@@ -5,6 +5,8 @@ import path from 'path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import { PRODUCT_NAME } from '../../../shared/productMetadata';
+import type { CoworkStore } from '../../data/coworkStore';
+import type { CoworkEngineRouter } from '../../engine/cowork/coworkEngineRouter';
 import type { OpenClawEngineManager } from '../../openclaw/runtime/openclawEngineManager';
 import {
   decodeBridgeLines,
@@ -17,7 +19,6 @@ import {
 } from './multicaBridgeProtocol';
 import {
   classifyMulticaRunStatus,
-  createMulticaWorkspaceConfig,
   MulticaBridgeServer,
   normalizeMulticaVersionProbeOutput,
 } from './multicaBridgeServer';
@@ -113,36 +114,6 @@ describe('MulticaBridgeServer', () => {
     ).toBe('completed');
   });
 
-  test('creates an isolated evaluation config pinned to the Skill-Up workspace', () => {
-    const userDataPath = createDirectory();
-    const workspace = path.join(userDataPath, 'skill-up workspace');
-    fs.mkdirSync(workspace);
-    const sourceConfigPath = path.join(userDataPath, 'source.json');
-    fs.writeFileSync(
-      sourceConfigPath,
-      JSON.stringify({
-        agents: {
-          defaults: { model: { primary: 'litellm/test-model' } },
-          list: [{ id: 'main', default: true, model: { primary: 'litellm/test-model' } }],
-        },
-      }),
-    );
-
-    const generated = createMulticaWorkspaceConfig({
-      sourceConfigPath,
-      cwd: workspace,
-      argv: ['agent', '--agent', 'main', '--local'],
-      userDataPath,
-    });
-    expect(generated).not.toBeNull();
-    const config = JSON.parse(fs.readFileSync(generated!.configPath, 'utf8'));
-    expect(config.agents.defaults.workspace).toBe(workspace);
-    expect(config.agents.list[0].workspace).toBe(workspace);
-    expect(config.agents.defaults.model.primary).toBe('litellm/test-model');
-    generated!.dispose();
-    expect(fs.existsSync(generated!.configPath)).toBe(false);
-  });
-
   test('authenticates the pipe and preserves streamed output and exit codes', async () => {
     const userDataPath = createDirectory();
     const cliScript = path.join(userDataPath, 'fake openclaw 中文.js');
@@ -169,6 +140,10 @@ describe('MulticaBridgeServer', () => {
       getDatabase: () => {
         throw new Error('not used');
       },
+      getCoworkEngineRouter: () => {
+        throw new Error('not used');
+      },
+      ensureCoworkRuntime: async () => ({ phase: 'running' }),
       onSessionsChanged: vi.fn(),
     });
 
@@ -232,6 +207,10 @@ describe('MulticaBridgeServer', () => {
       getDatabase: () => {
         throw new Error('not used');
       },
+      getCoworkEngineRouter: () => {
+        throw new Error('not used');
+      },
+      ensureCoworkRuntime: async () => ({ phase: 'running' }),
       onSessionsChanged: vi.fn(),
     });
 
@@ -263,31 +242,155 @@ describe('MulticaBridgeServer', () => {
     }
   });
 
-  test('projects configured models without exposing internal agents', async () => {
+  test('runs agent requests through a visible JustDo Cowork session', async () => {
     const userDataPath = createDirectory();
-    const cliScript = path.join(userDataPath, 'models.js');
-    fs.writeFileSync(
-      cliScript,
-      [
-        "if (process.argv.slice(2).join(' ') !== 'config get models.providers --json') process.exit(9);",
-        "process.stdout.write(JSON.stringify({ custom0: { models: [{ id: 'first-model' }, { id: 'second-model' }] } }));",
-      ].join('\n'),
-    );
+    const skillDirectory = path.join(userDataPath, 'skills', 'marker-skill');
+    fs.mkdirSync(skillDirectory, { recursive: true });
+    fs.writeFileSync(path.join(skillDirectory, 'SKILL.md'), '# Marker');
+    const Database = (await import('better-sqlite3')).default;
+    const db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE cowork_external_sessions (
+        source TEXT, external_session_key TEXT, cowork_session_id TEXT,
+        openclaw_session_id TEXT, openclaw_session_key TEXT, cwd TEXT,
+        status TEXT, created_at INTEGER, updated_at INTEGER,
+        PRIMARY KEY (source, external_session_key)
+      );
+    `);
+    const sessions = new Map<
+      string,
+      {
+        id: string;
+        messages: Array<{ type: 'user' | 'assistant'; content: string; modelName?: string }>;
+      }
+    >();
+    let createdSkillIds: string[] = [];
+    const coworkStore = {
+      getAgent: (id: string) =>
+        id === 'main' ? { id: 'main', model: 'provider/justdo-model' } : undefined,
+      createSession: (_title: string, _cwd: string, _mode: string, skillIds: string[]) => {
+        createdSkillIds = skillIds;
+        const session = { id: 'cowork-visible-1', messages: [] };
+        sessions.set(session.id, session);
+        return session;
+      },
+      getSession: (id: string) => sessions.get(id) ?? null,
+      updateSession: vi.fn(),
+    } as unknown as CoworkStore;
+    const startSession = vi.fn(async (sessionId: string, prompt: string) => {
+      const session = sessions.get(sessionId)!;
+      session.messages.push({ type: 'user', content: prompt });
+      session.messages.push({
+        type: 'assistant',
+        content: 'JustDo answer',
+        modelName: 'provider/justdo-model',
+      });
+    });
+    const router = {
+      startSession,
+      continueSession: vi.fn(),
+      stopSession: vi.fn(),
+      stopAllSessions: vi.fn(),
+    } as unknown as CoworkEngineRouter;
+    const buildCliEnvironment = vi.fn();
     const server = new MulticaBridgeServer({
       userDataPath,
-      getEngineManager: () =>
+      getEngineManager: () => ({ buildCliEnvironment }) as unknown as OpenClawEngineManager,
+      getCoworkStore: () => coworkStore,
+      getCoworkEngineRouter: () => router,
+      ensureCoworkRuntime: async () => ({ phase: 'running' }),
+      getDatabase: () => db,
+      onSessionsChanged: vi.fn(),
+    });
+
+    await server.start();
+    try {
+      const metadata = JSON.parse(
+        fs.readFileSync(path.join(userDataPath, 'multica', MULTICA_BRIDGE_METADATA_FILE), 'utf8'),
+      ) as MulticaBridgeMetadata;
+      const responses = await exchange(metadata.endpoint, {
+        type: 'request',
+        version: MULTICA_BRIDGE_PROTOCOL_VERSION,
+        requestId: 'cowork-agent-request',
+        token: metadata.token,
+        argv: [
+          'agent',
+          '--local',
+          '--json',
+          '--session-id',
+          'multica-visible',
+          '--agent',
+          'main',
+          '--message',
+          'Use the staged skill',
+        ],
+        cwd: userDataPath,
+        env: {},
+      });
+      const stdout = responses
+        .filter(response => response.type === 'stdout')
+        .map(response => Buffer.from(response.data, 'base64').toString('utf8'))
+        .join('');
+      const output = JSON.parse(stdout) as {
+        payloads: Array<{ text: string }>;
+        meta: { agentMeta: { sessionId: string; sessionKey: string; model: string } };
+      };
+
+      expect(buildCliEnvironment).not.toHaveBeenCalled();
+      expect(startSession).toHaveBeenCalledWith(
+        'cowork-visible-1',
+        'Use the staged skill',
+        expect.objectContaining({
+          agentId: 'main',
+          skillIds: ['marker-skill'],
+          workspaceRoot: userDataPath,
+        }),
+      );
+      expect(createdSkillIds).toEqual(['marker-skill']);
+      expect(output.payloads).toEqual([{ text: 'JustDo answer' }]);
+      expect(output.meta.agentMeta).toEqual({
+        sessionId: 'cowork-visible-1',
+        sessionKey: 'agent:main:justdo:cowork-visible-1',
+        model: 'provider/justdo-model',
+      });
+      expect(responses.at(-1)).toEqual({ type: 'exit', code: 0 });
+    } finally {
+      await server.stop();
+      db.close();
+    }
+  });
+
+  test('projects configured JustDo Agents without exposing internal agents', async () => {
+    const userDataPath = createDirectory();
+    const buildCliEnvironment = vi.fn();
+    const server = new MulticaBridgeServer({
+      userDataPath,
+      getEngineManager: () => ({ buildCliEnvironment }) as unknown as OpenClawEngineManager,
+      getCoworkStore: () =>
         ({
-          buildCliEnvironment: async () => ({
-            openclawEntry: cliScript,
-            env: { ...process.env, JUSTDO_ELECTRON_PATH: process.execPath },
-          }),
-        }) as unknown as OpenClawEngineManager,
-      getCoworkStore: () => {
-        throw new Error('not used');
-      },
+          listAgents: () => [
+            { id: 'main', name: 'Main Agent', model: 'custom0/first-model', enabled: true },
+            {
+              id: 'research',
+              name: 'Research Agent',
+              model: 'custom0/second-model',
+              enabled: true,
+            },
+            {
+              id: 'justdo-scheduler',
+              name: 'Scheduler',
+              model: 'custom0/internal',
+              enabled: true,
+            },
+          ],
+        }) as unknown as CoworkStore,
       getDatabase: () => {
         throw new Error('not used');
       },
+      getCoworkEngineRouter: () => {
+        throw new Error('not used');
+      },
+      ensureCoworkRuntime: async () => ({ phase: 'running' }),
       onSessionsChanged: vi.fn(),
     });
 
@@ -311,12 +414,14 @@ describe('MulticaBridgeServer', () => {
         .join('');
       const entries = JSON.parse(stdout) as Array<{ id: string; name: string; model: string }>;
 
-      expect(entries.map(entry => entry.name)).toEqual(['first-model', 'second-model']);
+      expect(entries.map(entry => entry.id)).toEqual(['main', 'research']);
+      expect(entries.map(entry => entry.name)).toEqual(['Main Agent', 'Research Agent']);
       expect(entries.map(entry => entry.model)).toEqual([
         'custom0/first-model',
         'custom0/second-model',
       ]);
-      expect(stdout).not.toMatch(/main|justdo|scheduler/i);
+      expect(stdout).not.toMatch(/justdo-scheduler|internal/i);
+      expect(buildCliEnvironment).not.toHaveBeenCalled();
       expect(responses.at(-1)).toEqual({ type: 'exit', code: 0 });
     } finally {
       await server.stop();
@@ -345,6 +450,10 @@ describe('MulticaBridgeServer', () => {
       getDatabase: () => {
         throw new Error('not used');
       },
+      getCoworkEngineRouter: () => {
+        throw new Error('not used');
+      },
+      ensureCoworkRuntime: async () => ({ phase: 'running' }),
       onSessionsChanged: vi.fn(),
     });
 

@@ -41,12 +41,10 @@ Creating it remains a Multica-owned operation: v0.4.32 stores custom runtime pro
 and synchronizes them across the workspace. Existing server-side profiles remain usable, but this
 integration neither reads nor mutates them.
 
-Multica's OpenClaw-compatible model picker normally enumerates agent IDs instead of the configured
-model catalog. The bridge replaces those discovery responses with temporary, unbranded agent entries
-derived from `models.providers`. Each entry binds one configured model and exists only in Multica's
-generated task config. Internal desktop agents (including the managed scheduler) are never returned
-to Multica, while provider credentials and other model-provider configuration stay in the desktop
-process.
+Multica's OpenClaw-compatible model picker enumerates Agent IDs. The bridge projects enabled JustDo
+Agents into both supported discovery responses and omits the managed scheduler. An `agent` request
+therefore selects that exact JustDo Agent; its model, system prompt, identity and managed skills all
+remain intact, while provider credentials and runtime configuration stay in the desktop process.
 
 Multica v0.4.36's local `runtime profile set-path` escape hatch is not usable for a normal Windows
 `.exe`: its daemon checks Unix executable permission bits (`0o111`), which Windows `os.Stat` does not
@@ -72,10 +70,13 @@ Desktop profile naming convention together with Multica Desktop's `.desktop-user
 - The launcher accepts only the compatibility command shapes used by Multica.
 - A per-process random token protects the local named pipe/Unix socket. Tokens and profile credentials
   are never sent to the renderer or written to logs.
-- Only Multica's temporary config path, include roots, and working directory cross the bridge.
-- Multica tasks use local mode, so the task workspace remains the Multica worktree.
-- Each external session maps to one local Cowork session. It is visible in JustDo with a Multica badge
-  and uses the authoritative Gateway history, but it is always read-only.
+- The evaluator's temporary OpenClaw config is not used for an Agent turn. JustDo synchronizes its
+  own Agent/provider/system-prompt configuration before sending the turn through Cowork/Gateway.
+- Multica tasks use local mode, so the task workspace remains the Multica worktree. Staged
+  `skills/<skill>/SKILL.md` directories are discovered there and recorded on the visible turn.
+- Each external session maps to one managed Cowork session key. User, assistant, thinking and tool
+  events stream into the normal JustDo chat window with a Multica badge; the session remains
+  read-only because the evaluator owns turn submission and cancellation.
 
 ## Direct Skill-Up evaluation
 
@@ -84,11 +85,36 @@ not run Multica Server or a Multica daemon. This mode uses the same launcher and
 JustDo running or in the tray, enable external connections once, and pass the launcher as the
 evaluator's `--agent-executable`.
 
-For Multica's `openclaw` backend, the evaluator's `--model` value is an OpenClaw agent ID rather
-than a provider model name. Use `main` to evaluate JustDo's configured main agent. The backend emits
-`agent --local --json --session-id ... --timeout ... --agent main --message ...`; the bridge keeps
-the Skill-Up workspace as the child process working directory, so a staged `skills/<skill>/SKILL.md`
-is discovered by the bundled OpenClaw runtime.
+Use the evaluator's user-facing `--agent justdo` entry. It reuses Multica's OpenClaw-compatible
+backend internally, but that implementation detail does not belong in the command line. For JustDo,
+the evaluator's `--model` value is a JustDo Agent ID rather than a provider model name. Use `main` to
+evaluate JustDo's configured main Agent, or create another JustDo Agent with the desired model and
+skills and pass that Agent's ID. The backend emits
+`agent --local --json --session-id ... --timeout ... --agent main --message ...`; the bridge sends
+that turn through the same Cowork router and Gateway path as the JustDo chat composer.
+
+### JustDo 调用命令
+
+保持 JustDo 桌面端运行，然后在包含评测 `skills/` 目录的工作区执行：
+
+```powershell
+$justDoAgent = "$env:APPDATA\JustDo\multica\development\JustDo-agent.exe"
+
+# 查看 Multica 可以选择的 JustDo Agent ID。
+& $justDoAgent agents list --json
+
+# 直接向 JustDo 的 main Agent 发起一个可见 Cowork 对话。
+& $justDoAgent agent --local --json `
+  --session-id "multica-manual-$([guid]::NewGuid().ToString('N'))" `
+  --timeout 180 `
+  --agent main `
+  --message "请使用当前工作区里的评测 skill 完成任务"
+```
+
+这里的 `--agent main` 对应 Multica/agent-eval 的 `--model main`。如果需要指定另一个模型，
+先在 JustDo 的 Agent 页面创建一个绑定该模型的 Agent，再把 `main` 替换成那个 Agent 的 ID。
+运行后，任务出现在 JustDo 会话列表的 `[Multica] ...` 条目中；打开该条目即可实时查看消息、
+thinking 和工具调用过程。
 
 Windows development build:
 
@@ -97,16 +123,19 @@ npm run multica:dev-agent
 npm run electron:dev:openclaw
 
 Set-Location D:\AI_FOR_WORLD\14_AI_workspace\common_tools\agent_eval_multca_skillup
-.\.runtime\windows\python\Scripts\agent-eval.exe run `
-  --skill .\skills\example-marker `
-  --agent openclaw `
+.\backend\.runtime\windows\python\Scripts\agent-eval.exe run `
+  --skill .\backend\skills\example-marker `
+  --agent justdo `
   --model main `
-  --agent-executable "$env:APPDATA\JustDo\multica\development\JustDo-agent.exe" `
-  --case .\skills\example-marker\evals\cases\marker.yaml `
+  --case .\backend\skills\example-marker\evals\cases\marker.yaml `
   --parallelism 1 `
   --iterations 1 `
   --benchmark
 ```
+
+Windows automatically discovers `%APPDATA%\JustDo\multica\development\JustDo-agent.exe`. Only add
+`--agent-executable <path>` when using a non-default launcher location; alternatively set
+`JUSTDO_AGENT_EXECUTABLE` once in the environment.
 
 Linux development build:
 
@@ -115,12 +144,11 @@ npm run electron:dev:openclaw
 # Enable external connections in JustDo once; the UI creates ~/.local/bin/JustDo-agent.
 
 cd /path/to/agent_eval_multca_skillup
-./.runtime/linux/python/bin/agent-eval run \
-  --skill ./skills/example-marker \
-  --agent openclaw \
+./backend/.runtime/linux/python/bin/agent-eval run \
+  --skill ./backend/skills/example-marker \
+  --agent justdo \
   --model main \
-  --agent-executable "$HOME/.local/bin/JustDo-agent" \
-  --case ./skills/example-marker/evals/cases/marker.yaml \
+  --case ./backend/skills/example-marker/evals/cases/marker.yaml \
   --parallelism 1 \
   --iterations 1 \
   --benchmark

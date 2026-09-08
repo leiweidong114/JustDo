@@ -1,10 +1,11 @@
 # Multica 无桌面 CLI 与迁移
 
-评测器注入 `OPENCLAW_CONFIG_PATH` 后，`JustDo-agent.exe` 通过
-`--justdo-multica-bridge` 启动独立的 Electron 主进程运行时，无需用户先打开桌面端。
-它复用同一个 EngineManager、会话存储、模型投影和带认证的 bridge 协议；没有降低鉴权要求。
-每次 CLI 请求使用独立临时 relay 目录，不覆盖桌面 `multica/bridge.json`，退出时清理。
-`--version` 也可独立运行。没有评测配置的其它调用仍保留原桌面 relay 行为。
+`JustDo-agent.exe` 优先连接已经运行的 JustDo 桌面 relay，即使评测器注入了
+`OPENCLAW_CONFIG_PATH`；这样 Agent turn 会实时显示在聊天窗口。没有桌面 relay 时，launcher
+通过 `--justdo-multica-bridge` 启动短生命周期 Electron 主进程，复用 JustDo 自己的
+EngineManager、Cowork router、会话数据库和带认证 bridge 协议。独立进程不使用评测器的
+OpenClaw 配置覆盖 JustDo Agent，只在请求结束后停止它启动的 Gateway。会话和完整消息仍会
+持久化，下次打开 JustDo 时可见。
 
 ## 在新 Windows 环境从源码构建
 
@@ -25,7 +26,7 @@ npm run multica:build-agent
 仅复制源码不能在完全无依赖的新机器上离线构建。或者在有网构建机生成完整安装包，移动整个产物。
 LiteLLM 地址、密钥、数据库网络连通性必须在新环境重新配置，不把旧凭据编入程序。
 
-验证：`agent-eval check-agent --agent justdo --model glm-4.5-air --prompt HI --database-verify`。
+验证：`agent-eval check-agent --agent justdo --model main --prompt HI --database-verify`。
 新环境端到端迁移仍需现场执行这条验证，当前机器的通过结果不代表所有平台已验证。
 
 `npm test` 需要先把 `better-sqlite3` 编译成当前 Node.js ABI。测试脚本会在 Vitest
