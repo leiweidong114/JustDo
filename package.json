@@ -45,6 +45,7 @@
     "postinstall": "node scripts/patch-http-mitm-proxy.cjs && electron-builder install-app-deps && npm run rebuild:electron-native",
     "pack": "npm run setup:python-runtime && npm run build && npm run compile:electron && electron-builder --config electron-builder.config.cjs --dir",
     "multica:dev-agent": "node scripts/create-multica-dev-agent.cjs",
+    "multica:build-agent": "npm run rebuild:electron-native && npm run build && npm run multica:dev-agent",
     "dist": "npm run setup:python-runtime && npm run build && npm run compile:electron && electron-builder --config electron-builder.config.cjs",
     "dist:mac": "node -r dotenv/config node_modules/.bin/electron-builder --mac --config electron-builder.config.cjs",
     "predist:mac": "npm run build && npm run compile:electron && npm run openclaw:runtime:mac-arm64",

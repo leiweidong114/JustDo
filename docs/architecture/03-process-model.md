@@ -241,4 +241,11 @@ Handler 在获得 single-instance lock 后统一注册。它们使用 getter 延
 
 ## 17. IPC Definition of Done
 
+### 独立 Multica CLI 主进程
+
+评测器携带 `OPENCLAW_CONFIG_PATH` 启动 `--justdo-multica-bridge` 时，主进程不创建桌面窗口，
+初始化原有 store、EngineManager 和会话数据库，通过每次运行独立的认证 relay 完成调用。
+它不覆盖正在运行的桌面 relay 元数据，也不改变鉴权协议。
+实现见 `multicaStandalone.ts`，迁移和构建步骤见 [无桌面 CLI](../features/multica-headless-cli.md)。
+
 新增接口完成时必须有稳定 channel 常量、运行时输入验证、明确 result/error contract、最小 preload 方法、Renderer declaration、销毁/取消语义和至少一个失败测试。涉及 Gateway 的接口还要定义 starting/disconnected/reconnecting 时行为；涉及写入的接口要定义重复调用和部分失败。

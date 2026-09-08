@@ -63,6 +63,7 @@ import {
   resolvePackagedMulticaAgentExecutable,
 } from './integrations/multica/multicaDevAgent';
 import { MulticaIntegrationService } from './integrations/multica/multicaIntegrationService';
+import { runMulticaStandalone } from './integrations/multica/multicaStandalone';
 import {
   applyBrowserModeChange,
   registerAppHandlers,
@@ -820,7 +821,26 @@ const scheduleReload = (reason: string, webContents?: WebContents) => {
 // CLI relay processes do not participate in Electron's single-instance lock.
 const gotTheLock = multicaBridgeArgv ? true : app.requestSingleInstanceLock();
 if (multicaBridgeArgv) {
-  void runMulticaBridgeClient(app.getPath('userData'), multicaBridgeArgv).then(code => {
+  // Evaluation supplies an isolated model configuration. Start the normal local
+  // runtime on demand without depending on a desktop window or its instance lock.
+  const runBridge = async (): Promise<number> => {
+    if (!process.env.OPENCLAW_CONFIG_PATH && multicaBridgeArgv[0] !== '--version') {
+      return runMulticaBridgeClient(app.getPath('userData'), multicaBridgeArgv);
+    }
+    await app.whenReady();
+    store = await initStore();
+    return runMulticaStandalone({
+      userDataPath: app.getPath('userData'),
+      getEngineManager: getOpenClawEngineManager,
+      getCoworkStore,
+      getDatabase: () => getStore().getDatabase(),
+      onSessionsChanged: () => undefined,
+    }, multicaBridgeArgv);
+  };
+  void runBridge().catch(error => {
+    process.stderr.write(`CLI runtime failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 70;
+  }).then(code => {
     process.exitCode = code;
     setImmediate(() => app.exit(code));
   });
