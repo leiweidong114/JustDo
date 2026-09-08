@@ -31,7 +31,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "prepare": "husky",
-    "test": "vitest run",
+    "test": "node scripts/run-tests-and-restore-electron.cjs",
     "pretest": "npm rebuild better-sqlite3",
     "preview": "vite preview",
     "compile:electron": "tsc --project electron-tsconfig.json",

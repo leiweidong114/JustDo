@@ -27,3 +27,8 @@ LiteLLM 地址、密钥、数据库网络连通性必须在新环境重新配置
 
 验证：`agent-eval check-agent --agent justdo --model glm-4.5-air --prompt HI --database-verify`。
 新环境端到端迁移仍需现场执行这条验证，当前机器的通过结果不代表所有平台已验证。
+
+`npm test` 需要先把 `better-sqlite3` 编译成当前 Node.js ABI。测试脚本会在 Vitest
+结束后（包括测试失败时）自动重新编译 Electron ABI，避免随后运行 `JustDo-agent.exe`
+出现 `NODE_MODULE_VERSION` 不匹配和退出码 70。如果手工执行过
+`npm rebuild better-sqlite3`，请运行 `npm run rebuild:electron-native` 恢复后再调用 JustDo。
