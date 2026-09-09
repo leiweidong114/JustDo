@@ -72,6 +72,10 @@ Desktop profile naming convention together with Multica Desktop's `.desktop-user
   are never sent to the renderer or written to logs.
 - The evaluator's temporary OpenClaw config is not used for an Agent turn. JustDo synchronizes its
   own Agent/provider/system-prompt configuration before sending the turn through Cowork/Gateway.
+  When the requested model is absent from JustDo, the authenticated local bridge temporarily
+  imports the evaluator's OpenAI-compatible LiteLLM endpoint and run-scoped credential, then
+  removes that provider after the visible Cowork run. It never changes the main Agent's permanent
+  model binding.
 - Multica tasks use local mode, so the task workspace remains the Multica worktree. Staged
   `skills/<skill>/SKILL.md` directories are discovered there and recorded on the visible turn.
 - Each external session maps to one managed Cowork session key. User, assistant, thinking and tool
@@ -88,10 +92,12 @@ evaluator's `--agent-executable`.
 Use the evaluator's user-facing `--agent justdo` entry. It reuses Multica's OpenClaw-compatible
 backend internally, but that implementation detail does not belong in the command line. For JustDo,
 the evaluator's `--model` retains its normal meaning: it is the provider model ID to evaluate. The
-model must already be enabled under exactly one JustDo provider; use a provider-qualified reference
-such as `litellm/glm-4.5-air` when the same model ID exists under multiple providers. The bridge
-applies it as a session-only model override before the first turn and fails closed if Gateway rejects
-the selection. The main Agent's permanent model configuration is not changed. The backend emits
+model is resolved from an enabled JustDo provider first. If it is absent there, the bridge uses the
+evaluator's OpenAI-compatible LiteLLM profile as a temporary request-scoped provider. Use a
+provider-qualified reference such as `litellm/glm-4.5-air` when the same configured model ID exists
+under multiple providers. The bridge applies it as a session-only model override before the first
+turn and fails closed if Gateway rejects the selection. The main Agent's permanent model
+configuration is not changed. The backend emits
 `agent --local --json --session-id ... --timeout ... --agent main --message ...`; the bridge sends
 that turn through the same Cowork router and Gateway path as the JustDo chat composer.
 
@@ -117,7 +123,9 @@ Remove-Item Env:AGENT_EVAL_PROVIDER_MODEL
 
 这里的 `--agent main` 是兼容协议内部使用的 JustDo 主 Agent ID，不是模型名。评测 CLI 的
 `--model glm-4.5-air` 通过 `AGENT_EVAL_PROVIDER_MODEL` 传入，并只覆盖本次外部会话的模型。
-该模型必须先在 JustDo 中启用；模型 ID 跨 provider 重名时传入 `provider/model`。
+手工调用 launcher 时仍需先在 JustDo 中启用模型，因为该命令没有评测器的 LiteLLM provider
+参数；通过 `agent-eval` 调用时，未配置模型会自动使用评测器的临时 provider。模型 ID 跨
+已配置 provider 重名时传入 `provider/model`。
 运行后，任务出现在 JustDo 会话列表的 `[Multica] ...` 条目中；打开该条目即可实时查看消息、
 thinking 和工具调用过程。
 

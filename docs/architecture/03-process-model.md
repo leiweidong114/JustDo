@@ -94,13 +94,16 @@ Electron 单实例锁或创建窗口，而是通过用户私有的 named pipe/Un
 Main 校验随机令牌和命令白名单后，版本和普通配置探针仍调用兼容 CLI，Agent 发现直接投影
 JustDo 中已启用的 Agent；`agent` 请求则创建受管 Cowork session，通过与聊天窗口相同的
 router/Gateway 发送，并把最终回复编码成 Multica 兼容 stdout。评测器指定的 provider model
-在首轮发送前解析为 JustDo 已启用的唯一 provider/model，并通过 `sessions.patch` 形成会话级
-覆盖；解析或应用失败时中止运行，且不修改 main Agent 的永久模型。会话列表、流式消息、
-thinking 和 tool events 同时由正常 Cowork 事件链更新。
+在首轮发送前优先解析为 JustDo 已启用的唯一 provider/model；不存在时，Main 将评测器提供的
+OpenAI-compatible LiteLLM 地址和本次运行凭据注册为临时 provider。随后通过 `sessions.patch`
+形成会话级覆盖，运行结束即移除临时 provider；解析或应用失败时中止运行，且不修改 main
+Agent 的永久模型。会话列表、流式消息、thinking 和 tool events 同时由正常 Cowork 事件链更新。
 
 Relay 只接受 Multica 工作目录以及显式白名单环境字段；其中
-`AGENT_EVAL_PROVIDER_MODEL` 仅用于选择会话模型，Gateway token、runtime 和 state directory
-均由 Main 控制。JustDo 完全退出时 CLI 快速失败，不会自动启动桌面应用。
+`AGENT_EVAL_PROVIDER_MODEL` 用于选择会话模型；`AGENT_EVAL_PROVIDER_BASE_URL`、
+`AGENT_EVAL_PROVIDER_PROTOCOL` 和 `LITELLM_API_KEY` 仅允许通过带随机令牌的本地 relay 进入
+临时 provider 生命周期，且不会写入日志或发送到 renderer。Gateway token、runtime 和 state
+directory 均由 Main 控制。JustDo 完全退出时 CLI 快速失败，不会自动启动桌面应用。
 
 ## 4. Cowork IPC
 

@@ -63,6 +63,11 @@ import {
   resolveMulticaDevAgentExecutable,
   resolvePackagedMulticaAgentExecutable,
 } from './integrations/multica/multicaDevAgent';
+import {
+  addMulticaEvaluationModel,
+  removeAllMulticaEvaluationModels,
+  removeMulticaEvaluationModel,
+} from './integrations/multica/multicaEvaluationModel';
 import { MulticaIntegrationService } from './integrations/multica/multicaIntegrationService';
 import { runMulticaStandalone } from './integrations/multica/multicaStandalone';
 import {
@@ -1289,6 +1294,12 @@ if (multicaBridgeArgv) {
       console.error('[OpenClaw] Startup extension host failed to provide callback config.');
     }
 
+    const storedAppConfig = getStore().get<Record<string, unknown>>('app_config') ?? {};
+    const cleanedAppConfig = removeAllMulticaEvaluationModels(storedAppConfig);
+    if (JSON.stringify(cleanedAppConfig) !== JSON.stringify(storedAppConfig)) {
+      getStore().set('app_config', cleanedAppConfig);
+    }
+
     const startupSync = await syncOpenClawConfig({
       reason: 'startup',
     });
@@ -1303,6 +1314,38 @@ if (multicaBridgeArgv) {
       getCoworkEngineRouter,
       ensureCoworkRuntime: ensureOpenClawRunningForCowork,
       getDatabase: () => getStore().getDatabase(),
+      provisionEvaluationModel: async input => {
+        const store = getStore();
+        const current = store.get<Record<string, unknown>>('app_config') ?? {};
+        const registration = addMulticaEvaluationModel(current, input);
+        store.set('app_config', registration.config);
+        const syncResult = await syncOpenClawConfig({ reason: 'multicaEvaluationModel' });
+        if (!syncResult.success) {
+          const latest = store.get<Record<string, unknown>>('app_config') ?? {};
+          store.set(
+            'app_config',
+            removeMulticaEvaluationModel(latest, registration.providerId),
+          );
+          throw new Error(
+            syncResult.error || 'JustDo could not apply the temporary evaluation model.',
+          );
+        }
+        return {
+          providerId: registration.providerId,
+          modelRef: registration.modelRef,
+        };
+      },
+      releaseEvaluationModel: async providerId => {
+        const store = getStore();
+        const current = store.get<Record<string, unknown>>('app_config') ?? {};
+        store.set('app_config', removeMulticaEvaluationModel(current, providerId));
+        const syncResult = await syncOpenClawConfig({ reason: 'multicaEvaluationModelCleanup' });
+        if (!syncResult.success) {
+          throw new Error(
+            syncResult.error || 'JustDo could not clean up the temporary evaluation model.',
+          );
+        }
+      },
       onSessionsChanged: () => {
         for (const window of BrowserWindow.getAllWindows()) {
           if (!window.isDestroyed()) window.webContents.send('cowork:sessions:changed');

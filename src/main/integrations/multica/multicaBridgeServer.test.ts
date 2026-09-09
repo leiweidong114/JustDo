@@ -296,7 +296,7 @@ describe('MulticaBridgeServer', () => {
         providers: {
           provider: {
             enabled: true,
-            models: [{ id: 'glm-4.5-air', enabled: true }],
+            models: [{ id: 'justdo-model', enabled: true }],
           },
         },
       }),
@@ -344,6 +344,11 @@ describe('MulticaBridgeServer', () => {
       stopSession: vi.fn(),
       stopAllSessions: vi.fn(),
     } as unknown as CoworkEngineRouter;
+    const provisionEvaluationModel = vi.fn(async () => ({
+      providerId: 'agent_eval_temporary',
+      modelRef: 'agent_eval_temporary/glm-4.5-air',
+    }));
+    const releaseEvaluationModel = vi.fn(async () => undefined);
     const buildCliEnvironment = vi.fn();
     const server = new MulticaBridgeServer({
       userDataPath,
@@ -352,6 +357,8 @@ describe('MulticaBridgeServer', () => {
       getCoworkEngineRouter: () => router,
       ensureCoworkRuntime: async () => ({ phase: 'running' }),
       getDatabase: () => db,
+      provisionEvaluationModel,
+      releaseEvaluationModel,
       onSessionsChanged: vi.fn(),
     });
 
@@ -377,7 +384,12 @@ describe('MulticaBridgeServer', () => {
           'Use the staged skill',
         ],
         cwd: userDataPath,
-        env: { AGENT_EVAL_PROVIDER_MODEL: 'glm-4.5-air' },
+        env: {
+          AGENT_EVAL_PROVIDER_MODEL: 'glm-4.5-air',
+          AGENT_EVAL_PROVIDER_BASE_URL: 'http://127.0.0.1:4000/v1',
+          AGENT_EVAL_PROVIDER_PROTOCOL: 'openai_compatible',
+          LITELLM_API_KEY: 'run-scoped-key',
+        },
       });
       const stdout = responses
         .filter(response => response.type === 'stdout')
@@ -391,9 +403,17 @@ describe('MulticaBridgeServer', () => {
       expect(buildCliEnvironment).not.toHaveBeenCalled();
       expect(patchSessionModel).toHaveBeenCalledWith(
         'cowork-visible-1',
-        'provider/glm-4.5-air',
+        'agent_eval_temporary/glm-4.5-air',
         'main',
       );
+      expect(provisionEvaluationModel).toHaveBeenCalledWith({
+        requestId: 'cowork-agent-request',
+        model: 'glm-4.5-air',
+        apiBase: 'http://127.0.0.1:4000/v1',
+        apiKey: 'run-scoped-key',
+        protocol: 'openai_compatible',
+      });
+      expect(releaseEvaluationModel).toHaveBeenCalledWith('agent_eval_temporary');
       expect(startSession).toHaveBeenCalledWith(
         'cowork-visible-1',
         'Use the staged skill',

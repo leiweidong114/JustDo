@@ -138,6 +138,14 @@ export interface MulticaBridgeServerOptions {
   getCoworkEngineRouter: () => CoworkEngineRouter;
   ensureCoworkRuntime: () => Promise<{ phase: string; message?: string }>;
   getDatabase: () => import('better-sqlite3').Database;
+  provisionEvaluationModel?: (input: {
+    requestId: string;
+    model: string;
+    apiBase: string;
+    apiKey: string;
+    protocol?: string;
+  }) => Promise<{ providerId: string; modelRef: string }>;
+  releaseEvaluationModel?: (providerId: string) => Promise<void>;
   onSessionsChanged: () => void;
 }
 
@@ -352,7 +360,13 @@ export class MulticaBridgeServer {
       }
       if (argv[0] === 'agent') {
         const requestEnvironment = sanitizeMulticaBridgeEnvironment(request.env || {});
-        await this.runCoworkAgentRequest(argv, cwd, requestEnvironment, socket);
+        await this.runCoworkAgentRequest(
+          request.requestId,
+          argv,
+          cwd,
+          requestEnvironment,
+          socket,
+        );
         return null;
       }
       const cli = await engineManager.buildCliEnvironment();
@@ -471,6 +485,7 @@ export class MulticaBridgeServer {
   }
 
   private async runCoworkAgentRequest(
+    requestId: string,
     argv: string[],
     cwd: string,
     env: Record<string, string>,
@@ -535,13 +550,30 @@ export class MulticaBridgeServer {
       }, timeoutMs);
     });
 
+    let temporaryProviderId: string | null = null;
     try {
       const requestedModel = env.AGENT_EVAL_PROVIDER_MODEL?.trim();
       if (requestedModel) {
-        const modelRef = resolveMulticaEvaluationModelRef(
-          this.options.getDatabase(),
-          requestedModel,
-        );
+        let modelRef: string;
+        try {
+          modelRef = resolveMulticaEvaluationModelRef(
+            this.options.getDatabase(),
+            requestedModel,
+          );
+        } catch (error) {
+          const apiBase = env.AGENT_EVAL_PROVIDER_BASE_URL?.trim();
+          const apiKey = env.LITELLM_API_KEY?.trim();
+          if (!apiBase || !apiKey || !this.options.provisionEvaluationModel) throw error;
+          const registration = await this.options.provisionEvaluationModel({
+            requestId,
+            model: requestedModel,
+            apiBase,
+            apiKey,
+            protocol: env.AGENT_EVAL_PROVIDER_PROTOCOL?.trim(),
+          });
+          temporaryProviderId = registration.providerId;
+          modelRef = registration.modelRef;
+        }
         const modelResult = await router.patchSessionModel(
           binding.coworkSessionId,
           modelRef,
@@ -607,6 +639,13 @@ export class MulticaBridgeServer {
       socket.off('close', onSocketClose);
       this.activeCoworkSessions.delete(binding.coworkSessionId);
       this.options.onSessionsChanged();
+      if (temporaryProviderId && this.options.releaseEvaluationModel) {
+        await this.options.releaseEvaluationModel(temporaryProviderId).catch(error => {
+          console.warn(`${LOG_PREFIX} Failed to clean up a temporary evaluation model.`, {
+            category: error instanceof Error ? error.name : 'UNKNOWN_ERROR',
+          });
+        });
+      }
     }
   }
 
