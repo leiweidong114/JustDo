@@ -555,15 +555,9 @@ export class MulticaBridgeServer {
       const requestedModel = env.AGENT_EVAL_PROVIDER_MODEL?.trim();
       if (requestedModel) {
         let modelRef: string;
-        try {
-          modelRef = resolveMulticaEvaluationModelRef(
-            this.options.getDatabase(),
-            requestedModel,
-          );
-        } catch (error) {
-          const apiBase = env.AGENT_EVAL_PROVIDER_BASE_URL?.trim();
-          const apiKey = env.LITELLM_API_KEY?.trim();
-          if (!apiBase || !apiKey || !this.options.provisionEvaluationModel) throw error;
+        const apiBase = env.AGENT_EVAL_PROVIDER_BASE_URL?.trim();
+        const apiKey = env.LITELLM_API_KEY?.trim();
+        if (apiBase && apiKey && this.options.provisionEvaluationModel) {
           const registration = await this.options.provisionEvaluationModel({
             requestId,
             model: requestedModel,
@@ -573,6 +567,17 @@ export class MulticaBridgeServer {
           });
           temporaryProviderId = registration.providerId;
           modelRef = registration.modelRef;
+        } else {
+          // A direct JustDo launcher invocation may intentionally rely on a
+          // model already configured by the user. Agent Eval requests always
+          // include their authenticated adapter endpoint and must use it even
+          // when a same-named model exists in JustDo; otherwise the run can
+          // silently bypass LiteLLM/model verification or inherit a stale
+          // custom provider reference.
+          modelRef = resolveMulticaEvaluationModelRef(
+            this.options.getDatabase(),
+            requestedModel,
+          );
         }
         const modelResult = await router.patchSessionModel(
           binding.coworkSessionId,

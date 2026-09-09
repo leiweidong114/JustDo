@@ -298,6 +298,11 @@ describe('MulticaBridgeServer', () => {
             enabled: true,
             models: [{ id: 'justdo-model', enabled: true }],
           },
+          custom_5: {
+            enabled: true,
+            displayName: 'Custom5',
+            models: [{ id: 'glm-4.5-air', enabled: true }],
+          },
         },
       }),
       Date.now(),
