@@ -520,6 +520,11 @@ export class MulticaBridgeServer {
     const startedAt = Date.now();
     let timedOut = false;
     let disconnected = socket.destroyed;
+    let runtimeError: string | null = null;
+    const onRuntimeError = (sessionId: string, error: string): void => {
+      if (sessionId === binding.coworkSessionId) runtimeError = error;
+    };
+    router.on('error', onRuntimeError);
     const stopSession = (): void => {
       void router
         .stopSession(binding.coworkSessionId, { bestEffort: true })
@@ -609,6 +614,9 @@ export class MulticaBridgeServer {
       if (disconnected) throw new Error('Multica client disconnected from the JustDo session.');
 
       const session = store.getSession(binding.coworkSessionId);
+      if (session?.status === 'error') {
+        throw new Error(runtimeError || 'JustDo Agent runtime ended with an error.');
+      }
       const assistant = session?.messages
         .slice(messageCountBeforeRun)
         .filter(message => message.type === 'assistant' && message.content.trim())
@@ -649,6 +657,7 @@ export class MulticaBridgeServer {
     } finally {
       if (timeoutTimer) clearTimeout(timeoutTimer);
       socket.off('close', onSocketClose);
+      router.off('error', onRuntimeError);
       this.activeCoworkSessions.delete(binding.coworkSessionId);
       this.options.onSessionsChanged();
       if (temporaryProviderId && this.options.releaseEvaluationModel) {

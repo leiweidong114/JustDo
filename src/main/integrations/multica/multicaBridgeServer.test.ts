@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { EventEmitter } from 'events';
 import net from 'net';
 import os from 'os';
 import path from 'path';
@@ -311,6 +312,7 @@ describe('MulticaBridgeServer', () => {
       string,
       {
         id: string;
+        status: 'idle' | 'completed' | 'error';
         messages: Array<{ type: 'user' | 'assistant'; content: string; modelName?: string }>;
       }
     >();
@@ -320,21 +322,27 @@ describe('MulticaBridgeServer', () => {
         id === 'main' ? { id: 'main', model: 'provider/justdo-model' } : undefined,
       createSession: (_title: string, _cwd: string, _mode: string, skillIds: string[]) => {
         createdSkillIds = skillIds;
-        const session = { id: 'cowork-visible-1', messages: [] };
+        const session = { id: 'cowork-visible-1', status: 'idle' as const, messages: [] };
         sessions.set(session.id, session);
         return session;
       },
       getSession: (id: string) => sessions.get(id) ?? null,
       updateSession: vi.fn(),
     } as unknown as CoworkStore;
+    const routerEvents = new EventEmitter();
+    let failWithPartialResponse = false;
     const startSession = vi.fn(async (sessionId: string, prompt: string) => {
       const session = sessions.get(sessionId)!;
       session.messages.push({ type: 'user', content: prompt });
       session.messages.push({
         type: 'assistant',
-        content: 'JustDo answer',
+        content: failWithPartialResponse ? 'Partial answer before failure' : 'JustDo answer',
         modelName: 'provider/justdo-model',
       });
+      session.status = failWithPartialResponse ? 'error' : 'completed';
+      if (failWithPartialResponse) {
+        routerEvents.emit('error', sessionId, '429 balance exhausted');
+      }
     });
     const patchSessionModel = vi.fn(async () => ({
       ok: true as const,
@@ -343,6 +351,8 @@ describe('MulticaBridgeServer', () => {
       source: 'gateway' as const,
     }));
     const router = {
+      on: routerEvents.on.bind(routerEvents),
+      off: routerEvents.off.bind(routerEvents),
       startSession,
       patchSessionModel,
       continueSession: vi.fn(),
@@ -436,6 +446,37 @@ describe('MulticaBridgeServer', () => {
         model: 'provider/justdo-model',
       });
       expect(responses.at(-1)).toEqual({ type: 'exit', code: 0 });
+
+      failWithPartialResponse = true;
+      const failedResponses = await exchange(metadata.endpoint, {
+        type: 'request',
+        version: MULTICA_BRIDGE_PROTOCOL_VERSION,
+        requestId: 'cowork-agent-error-request',
+        token: metadata.token,
+        argv: [
+          'agent',
+          '--local',
+          '--json',
+          '--session-id',
+          'multica-visible-error',
+          '--agent',
+          'main',
+          '--message',
+          'Return a partial response and then fail',
+        ],
+        cwd: userDataPath,
+        env: {
+          AGENT_EVAL_PROVIDER_MODEL: 'glm-4.5-air',
+          AGENT_EVAL_PROVIDER_BASE_URL: 'http://127.0.0.1:4000/v1',
+          AGENT_EVAL_PROVIDER_PROTOCOL: 'openai_compatible',
+          LITELLM_API_KEY: 'run-scoped-key',
+        },
+      });
+      expect(failedResponses).toContainEqual({
+        type: 'error',
+        message: '429 balance exhausted',
+      });
+      expect(failedResponses.some(response => response.type === 'stdout')).toBe(false);
     } finally {
       await server.stop();
       db.close();

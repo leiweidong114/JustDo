@@ -7,6 +7,10 @@ EngineManager、Cowork router、会话数据库和带认证 bridge 协议。独�
 OpenClaw 配置覆盖 JustDo Agent，只在请求结束后停止它启动的 Gateway。会话和完整消息仍会
 持久化，下次打开 JustDo 时可见。
 
+桥接以 Cowork 会话终态为准：如果 OpenClaw 在工具调用之间因模型额度、鉴权或上游错误
+进入 `error`，即使此前已经生成过部分 assistant 文本，也会向 Multica 返回失败，而不会把
+部分文本误报为一次成功完成。
+
 ## 在新 Windows 环境从源码构建
 
 ```powershell
