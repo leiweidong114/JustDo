@@ -768,6 +768,19 @@ flowchart LR
 - **可删除条件**：上游原生把 loop detection 限定到 agent-run tool calls，或提供不经过工具执行的
   结构化 subagent list RPC，同时继续保留 Gateway 工具授权与审批边界。
 
+#### `050-inherit-parent-session-model.cjs`
+
+- **做什么**：当原生 `sessions_spawn` 没有显式传 `model`、且目标 Agent 与父 Agent 相同时，
+  从父会话持久化的 `providerOverride/modelOverride` 继承本次运行实际使用的模型。这样由 Multica
+  评测桥接器注入的运行级模型会继续用于子 Agent，不会回退到 JustDo 全局默认模型。
+- **关系与边界**：复用 `026` 已建立的父会话存储查找；显式 `sessions_spawn.model` 始终优先，
+  跨 Agent 委派继续使用目标 Agent 自己的配置，ACP 不受影响。只接受非空字符串，不修改用户的
+  全局 `subagents.model`，因此并发运行不会相互覆盖。
+- **当前保留原因**：目标版解析子 Agent 模型时只读取显式参数和静态 Agent/default 配置，不读取
+  `sessions.patch` 写入父会话的运行级选择，导致评测主会话和子会话实际使用不同模型。
+- **可删除条件**：上游原生把父会话 effective model 作为同 Agent 子会话的默认模型，并保留显式
+  override 与跨 Agent 配置优先级。
+
 ## 已删除或由上游/App 承担的能力
 
 | 能力                                            | v2026.7.1-2 证据与决定                                                                                                                                                                                                                                                 |
@@ -821,7 +834,7 @@ flowchart LR
 
 | 测试                                                  | 主要覆盖                                                                                                                                   |
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `openclawPristineContracts.test.ts`                   | 锁定原始 npm 包、11 项上游能力证据、49 项保留缺口、头注释和大小约束。                                                                      |
+| `openclawPristineContracts.test.ts`                   | 锁定原始 npm 包、11 项上游能力证据、50 项保留缺口、头注释和大小约束。                                                                      |
 | `openclawV202671ReasoningStream.test.ts`              | `002` callback gate 的原始失败与改写后事件/回调行为。                                                                                      |
 | `openclawV202671PatchSafety.test.ts`                  | `001`、`004`、`007`、`034` 的安全边界和真实 fixture 幂等。                                                                                 |
 | `openclawV202671CompletionDelivery.test.ts`           | H07 上游语义、managed yield 非对外交付、subagent `NO_REPLY` 非成功，以及 `015`、`016` 的 FIFO、硬期限和恢复边界。                          |
@@ -836,6 +849,7 @@ flowchart LR
 | `openai-compatible-embedding-env-proxy.test.ts`       | `047` generic embedding 的 eligible env proxy、真实 HTTP proxy 路由、source/bundle verify、幂等与歧义拒绝。                                |
 | `memory-force-reembed-opt-in.test.ts`                 | `048` 精确 host opt-in、默认缓存不变、source verify、幂等、部分状态与歧义拒绝。                                                            |
 | `gateway-tool-invoke-loop-scope.test.ts`              | `049` 运维 RPC loop scope、hook/审批保留、source/bundle verify、幂等、部分状态与歧义拒绝。                                                 |
+| `inherit-parent-session-model.test.ts`                | `050` 同 Agent 父会话模型继承、显式 override、跨 Agent 隔离、source/bundle 幂等与部分状态拒绝。                                           |
 | `openclawV202671ManagedSessionIdentity.test.ts`       | `036` command、reply、agent initial/persisted 四落点 identity pin（含 reply reset 绕过）、普通会话不变、幂等和多目标原子失败。             |
 | `openclawV202671ApprovalLifecycle.test.ts`            | `022`–`025` 的 lifetime、hidden resume、stop/failure 与文件头。                                                                            |
 | `openclawV202671RequestMetadata.test.ts`              | `026`–`028`，含 strict-compatible negative 与 nested parent。                                                                              |

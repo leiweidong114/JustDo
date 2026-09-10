@@ -836,7 +836,14 @@ if (multicaBridgeArgv) {
       MULTICA_BRIDGE_METADATA_FILE,
     );
     if (fs.existsSync(desktopMetadataPath)) {
-      return runMulticaBridgeClient(app.getPath('userData'), multicaBridgeArgv);
+      const desktopResult = await runMulticaBridgeClient(
+        app.getPath('userData'),
+        multicaBridgeArgv,
+      );
+      // A force-closed desktop can leave bridge.json behind. Exit 69 means the
+      // endpoint is absent/unreachable, so continue through the self-contained
+      // CLI runtime instead of requiring the user to start the desktop first.
+      if (desktopResult !== 69) return desktopResult;
     }
     await app.whenReady();
     store = await initStore();
@@ -850,6 +857,42 @@ if (multicaBridgeArgv) {
           getCoworkEngineRouter,
           ensureCoworkRuntime: ensureOpenClawRunningForCowork,
           getDatabase: () => getStore().getDatabase(),
+          provisionEvaluationModel: async input => {
+            const appStore = getStore();
+            const current = appStore.get<Record<string, unknown>>('app_config') ?? {};
+            const registration = addMulticaEvaluationModel(current, input);
+            appStore.set('app_config', registration.config);
+            const syncResult = await syncOpenClawConfig({
+              reason: 'multicaStandaloneEvaluationModel',
+            });
+            if (!syncResult.success) {
+              const latest = appStore.get<Record<string, unknown>>('app_config') ?? {};
+              appStore.set(
+                'app_config',
+                removeMulticaEvaluationModel(latest, registration.providerId),
+              );
+              throw new Error(
+                syncResult.error || 'JustDo could not apply the temporary evaluation model.',
+              );
+            }
+            return {
+              providerId: registration.providerId,
+              modelRef: registration.modelRef,
+            };
+          },
+          releaseEvaluationModel: async providerId => {
+            const appStore = getStore();
+            const current = appStore.get<Record<string, unknown>>('app_config') ?? {};
+            appStore.set('app_config', removeMulticaEvaluationModel(current, providerId));
+            const syncResult = await syncOpenClawConfig({
+              reason: 'multicaStandaloneEvaluationModelCleanup',
+            });
+            if (!syncResult.success) {
+              throw new Error(
+                syncResult.error || 'JustDo could not clean up the temporary evaluation model.',
+              );
+            }
+          },
           onSessionsChanged: () => undefined,
         },
         multicaBridgeArgv,

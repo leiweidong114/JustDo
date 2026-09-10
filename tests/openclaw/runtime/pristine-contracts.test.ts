@@ -68,6 +68,7 @@ const EXPECTED_PATCH_FILES = [
   '047-openai-compatible-embedding-env-proxy.cjs',
   '048-memory-force-reembed-opt-in.cjs',
   '049-gateway-tool-invoke-loop-scope.cjs',
+  '050-inherit-parent-session-model.cjs',
 ] as const;
 
 function createPristineFixture(): string {
