@@ -648,6 +648,24 @@ describe('OpenClawConfigSyncService', () => {
     expect(harness.stopGateway).toHaveBeenCalledOnce();
   });
 
+  it('retries an in-flight start that failed with the previous secret environment', async () => {
+    const harness = createHarness({
+      phase: 'starting',
+      nextSecrets: { API_TOKEN: 'changed' },
+    });
+    harness.startGateway.mockImplementationOnce(async () => ({
+      ...runningStatus,
+      phase: 'error',
+      message: 'Previous secret environment was unavailable.',
+    }));
+
+    await expect(harness.service.syncConfig({ reason: 'test' })).resolves.toMatchObject({
+      success: true,
+      changed: true,
+    });
+    expect(harness.startGateway).toHaveBeenCalledTimes(2);
+  });
+
   it('does not revive a Gateway stopped while a hard restart is deferred', async () => {
     vi.useFakeTimers();
     const harness = createHarness({

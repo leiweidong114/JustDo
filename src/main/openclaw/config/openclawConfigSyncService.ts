@@ -528,7 +528,7 @@ export class OpenClawConfigSyncService {
     let status = engineManager.getStatus();
     if (status.phase === 'starting') {
       status = await engineManager.startGateway();
-      if (status.phase !== 'running') {
+      if (status.phase !== 'running' && !restartAfterInFlightStart) {
         return {
           success: false,
           changed,
@@ -539,7 +539,7 @@ export class OpenClawConfigSyncService {
             'OpenClaw gateway did not finish starting before its required restart.',
         };
       }
-      if (!restartAfterInFlightStart) {
+      if (status.phase === 'running' && !restartAfterInFlightStart) {
         return this.restoreGatewayBridgeOrFailClosed({
           success: true,
           changed,
