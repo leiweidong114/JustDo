@@ -2124,6 +2124,7 @@ export class OpenClawConfigSync {
    * user sets up a model in the UI.
    */
   private writeMinimalConfig(configPath: string, reason: string): OpenClawConfigSyncResult {
+    const clearingEvaluationModel = reason === 'multicaEvaluationModelCleanup';
     const coworkConfig = this.getCoworkConfig();
     const configuredWorkspaceDir = (coworkConfig.workingDirectory || '').trim();
     const resolvedWorkspaceDir = configuredWorkspaceDir
@@ -2276,6 +2277,9 @@ export class OpenClawConfigSync {
               // Replace rather than deep-merge so stale managed keys are removed.
               compaction: buildManagedOpenClawCompactionConfig(),
             };
+            if (clearingEvaluationModel) {
+              delete mergedDefaults.model;
+            }
             if (agentRuntimeSettings.agent.thinking) {
               mergedDefaults.thinkingDefault = agentRuntimeSettings.agent.thinking;
             } else {
@@ -2299,6 +2303,7 @@ export class OpenClawConfigSync {
             );
             const mergedConfig = withDisabledMemorySearch({
               ...existing,
+              ...(clearingEvaluationModel ? { models: minimalConfig.models } : {}),
               diagnostics: {
                 ...existingDiagnostics,
                 otel: {
@@ -2308,6 +2313,16 @@ export class OpenClawConfigSync {
               agents: {
                 ...existingAgents,
                 defaults: mergedDefaults,
+                ...(clearingEvaluationModel && Array.isArray(existingAgents.list)
+                  ? {
+                      list: existingAgents.list.map(entry => {
+                        if (!isRecord(entry)) return entry;
+                        const cleaned = { ...entry };
+                        delete cleaned.model;
+                        return cleaned;
+                      }),
+                    }
+                  : {}),
               },
               session: buildManagedOpenClawSessionConfig(),
               mcp: {

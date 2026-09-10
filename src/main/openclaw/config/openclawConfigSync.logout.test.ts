@@ -626,6 +626,22 @@ describe('OpenClaw auth logout config sync', () => {
     );
   });
 
+  test('removes a released evaluation provider from an otherwise preserved config', () => {
+    const configPath = writeExistingBuiltinConfig();
+
+    const result = writeMinimalConfig(configPath, 'multicaEvaluationModelCleanup');
+
+    expect(result.ok).toBe(true);
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(config.models).toEqual({ pricing: { enabled: false } });
+    expect(config.agents.defaults.model).toBeUndefined();
+    expect(config.agents.list[0].model).toBeUndefined();
+    expect(config.customFeature).toEqual({
+      enabled: true,
+      nested: { value: 'preserve-me' },
+    });
+  });
+
   test('minimal logout removes only built-in model config and preserves custom selections', () => {
     const configPath = writeExistingMixedProviderConfig();
 

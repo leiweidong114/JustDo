@@ -505,11 +505,6 @@ export class MulticaBridgeServer {
       );
     }
 
-    const runtimeStatus = await this.options.ensureCoworkRuntime();
-    if (runtimeStatus.phase !== 'running') {
-      throw new Error(runtimeStatus.message || 'JustDo Cowork runtime is not ready.');
-    }
-
     const skillIds = this.discoverWorkspaceSkillIds(cwd);
     const externalStore = new MulticaExternalSessionStore(this.options.getDatabase(), store);
     const rewritten = rewriteMulticaAgentSessionArgs(argv, externalStore, cwd, skillIds);
@@ -553,8 +548,8 @@ export class MulticaBridgeServer {
     let temporaryProviderId: string | null = null;
     try {
       const requestedModel = env.AGENT_EVAL_PROVIDER_MODEL?.trim();
+      let modelRef: string | null = null;
       if (requestedModel) {
-        let modelRef: string;
         const apiBase = env.AGENT_EVAL_PROVIDER_BASE_URL?.trim();
         const apiKey = env.LITELLM_API_KEY?.trim();
         if (apiBase && apiKey && this.options.provisionEvaluationModel) {
@@ -579,6 +574,18 @@ export class MulticaBridgeServer {
             requestedModel,
           );
         }
+      }
+
+      // Provision the run-scoped provider before starting the Gateway. A stale
+      // disabled provider in the previously generated openclaw.json can make
+      // the Gateway fail authentication before the evaluation model is ever
+      // applied; provisioning first rewrites that config with a usable model.
+      const runtimeStatus = await this.options.ensureCoworkRuntime();
+      if (runtimeStatus.phase !== 'running') {
+        throw new Error(runtimeStatus.message || 'JustDo Cowork runtime is not ready.');
+      }
+
+      if (requestedModel && modelRef) {
         const modelResult = await router.patchSessionModel(
           binding.coworkSessionId,
           modelRef,
