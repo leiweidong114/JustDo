@@ -2,7 +2,8 @@
 
 // Capability: attach LiteLLM agent session/parent metadata and one-shot user initiation evidence.
 // Target: pristine openclaw@2026.7.1-2, which emits no equivalent provider payload metadata.
-// Scope: adds chat.send schema/registration plus builtin_models agent egress only.
+// Scope: adds chat.send schema/registration plus builtin_models and evaluator-owned
+// agent_eval_* provider egress only.
 // Safety: strict compatible/custom providers receive no OpenClaw request metadata; their one-shot run
 // bookkeeping is discarded. Missing identity is logged and egress continues unmodified.
 // user_initiated is consumed once and stable IDs are never rewritten.
@@ -31,6 +32,7 @@ const AGENT_METADATA_SEMANTIC_CONTRACTS = [
   'const parentSessionId = persistedParentSessionId && persistedParentSessionId !== sessionId',
   'session_id: sessionId,',
   'request_purpose: "agent"',
+  'params.modelProvider.startsWith("agent_eval_")',
   'if (parentSessionId) payload.metadata.parent_session_id = parentSessionId;',
   'else delete payload.metadata.parent_session_id;',
   'if (firstRequest && userRuns?.delete(params.runId)) payload.metadata.user_initiated = true;',
@@ -74,7 +76,7 @@ function installAgentMetadataWrapperAfterProviderSetup(content, filePath) {
 function buildAgentMetadataWrapperFunction() {
   return `function wrapJustDoAgentRequestMetadata(streamFn, params) {
   const userRuns = globalThis[Symbol.for("justdo.litellm.user-runs")];
-  if (!justDoLiteLLMProviderIds.has(params.modelProvider) || !justDoLiteLLMMetadataApis.has(params.modelApi)) {
+  if (!(justDoLiteLLMProviderIds.has(params.modelProvider) || typeof params.modelProvider === "string" && params.modelProvider.startsWith("agent_eval_")) || !justDoLiteLLMMetadataApis.has(params.modelApi)) {
     userRuns?.delete(params.runId);
     return streamFn;
   }
@@ -321,7 +323,7 @@ function verifyPatch(runtimeDir) {
     for (const [label, contract] of [
       [
         'provider and API gate',
-        /if \(!justDoLiteLLMProviderIds\.has\(params\.modelProvider\) \|\| !justDoLiteLLMMetadataApis\.has\(params\.modelApi\)\)\s*\{\s*userRuns\?\.delete\(params\.runId\);\s*return streamFn;\s*\}/,
+        /if \(!\(justDoLiteLLMProviderIds\.has\(params\.modelProvider\) \|\| typeof params\.modelProvider === "string" && params\.modelProvider\.startsWith\("agent_eval_"\)\) \|\| !justDoLiteLLMMetadataApis\.has\(params\.modelApi\)\)\s*\{\s*userRuns\?\.delete\(params\.runId\);\s*return streamFn;\s*\}/,
       ],
       [
         'missing session fail-open log',

@@ -115,6 +115,7 @@ describe('Multica bridge protocol', () => {
         AGENT_EVAL_PROVIDER_BASE_URL: 'http://127.0.0.1:4000/v1',
         AGENT_EVAL_PROVIDER_MODEL: 'glm-4.5-air',
         AGENT_EVAL_PROVIDER_PROTOCOL: 'openai_compatible',
+        AGENT_EVAL_ARTIFACT_DIR: 'C:\\eval\\artifacts',
         OPENCLAW_GATEWAY_TOKEN: 'must-not-cross',
       }),
     ).toEqual({
@@ -124,6 +125,7 @@ describe('Multica bridge protocol', () => {
       AGENT_EVAL_PROVIDER_BASE_URL: 'http://127.0.0.1:4000/v1',
       AGENT_EVAL_PROVIDER_MODEL: 'glm-4.5-air',
       AGENT_EVAL_PROVIDER_PROTOCOL: 'openai_compatible',
+      AGENT_EVAL_ARTIFACT_DIR: 'C:\\eval\\artifacts',
     });
   });
 

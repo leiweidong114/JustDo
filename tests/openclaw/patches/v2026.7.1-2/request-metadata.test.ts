@@ -228,6 +228,22 @@ describe('OpenClaw v2026.7.1-2 request metadata isolation', () => {
     expect(userRuns).toEqual(new Set());
   });
 
+  test('agent metadata also covers temporary evaluation providers', () => {
+    const wrap = agentMetadataWrapper();
+    const stream = wrap(vi.fn(), {
+      sessionId: 'evaluation-child-session',
+      sessionKey: 'agent:main:subagent:reviewer',
+      spawnedBy: 'agent:main',
+      runId: 'evaluation-run',
+      modelApi: 'openai-completions',
+      modelProvider: 'agent_eval_temporary',
+    });
+    const payload = stream() as { metadata: Record<string, unknown> };
+
+    expect(payload.metadata.session_id).toBe('evaluation-child-session');
+    expect(payload.metadata.request_purpose).toBe('agent');
+  });
+
   test('agent metadata keeps the stable session and marks only the first explicit request', () => {
     const wrap = agentMetadataWrapper();
     const userRuns = new Set(['run-1']);

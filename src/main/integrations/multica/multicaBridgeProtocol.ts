@@ -82,6 +82,7 @@ export function sanitizeMulticaBridgeEnvironment(env: NodeJS.ProcessEnv): Record
     'AGENT_EVAL_PROVIDER_BASE_URL',
     'AGENT_EVAL_PROVIDER_MODEL',
     'AGENT_EVAL_PROVIDER_PROTOCOL',
+    'AGENT_EVAL_ARTIFACT_DIR',
   ] as const) {
     const value = env[name]?.trim();
     if (value && !hasLineBreak(value)) result[name] = value;

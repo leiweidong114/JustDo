@@ -6,7 +6,7 @@ import path from 'path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import { PRODUCT_NAME } from '../../../shared/productMetadata';
-import type { CoworkStore } from '../../data/coworkStore';
+import type { CoworkMessage, CoworkStore } from '../../data/coworkStore';
 import type { CoworkEngineRouter } from '../../engine/cowork/coworkEngineRouter';
 import type { OpenClawEngineManager } from '../../openclaw/runtime/openclawEngineManager';
 import {
@@ -20,10 +20,34 @@ import {
 } from './multicaBridgeProtocol';
 import {
   classifyMulticaRunStatus,
+  encodeMulticaTelemetry,
   MulticaBridgeServer,
   normalizeMulticaVersionProbeOutput,
   resolveMulticaEvaluationModelRef,
 } from './multicaBridgeServer';
+
+test('encodes tool and subagent messages as Multica NDJSON telemetry', () => {
+  const messages = [
+    {
+      id: 'call-1', type: 'tool_use', content: '', timestamp: 1,
+      metadata: { toolName: 'read', toolUseId: 'call-1', toolInput: { path: 'a.txt' } },
+    },
+    {
+      id: 'result-1', type: 'tool_result', content: 'file body', timestamp: 2,
+      metadata: { toolName: 'read', toolUseId: 'call-1' },
+    },
+    {
+      id: 'child-1', type: 'subagent_completion', content: 'child answer', timestamp: 3,
+    },
+  ] as CoworkMessage[];
+
+  expect(encodeMulticaTelemetry(messages).split('\n').map(line => JSON.parse(line))).toEqual([
+    { type: 'tool_use', tool: 'read', callId: 'call-1', input: { path: 'a.txt' } },
+    { type: 'tool_result', tool: 'read', callId: 'call-1', text: 'file body', status: 'completed' },
+    { type: 'tool_use', tool: 'subagent_completion', callId: 'child-1', input: {} },
+    { type: 'tool_result', tool: 'subagent_completion', callId: 'child-1', text: 'child answer' },
+  ]);
+});
 
 const temporaryDirectories: string[] = [];
 
@@ -382,6 +406,9 @@ describe('MulticaBridgeServer', () => {
       const metadata = JSON.parse(
         fs.readFileSync(path.join(userDataPath, 'multica', MULTICA_BRIDGE_METADATA_FILE), 'utf8'),
       ) as MulticaBridgeMetadata;
+      fs.mkdirSync(path.join(userDataPath, 'generated'), { recursive: true });
+      fs.writeFileSync(path.join(userDataPath, 'generated', 'schematic.kicad_sch'), 'fixture');
+      const artifactDir = path.join(userDataPath, 'evaluation-artifacts');
       const responses = await exchange(metadata.endpoint, {
         type: 'request',
         version: MULTICA_BRIDGE_PROTOCOL_VERSION,
@@ -403,6 +430,7 @@ describe('MulticaBridgeServer', () => {
           AGENT_EVAL_PROVIDER_MODEL: 'glm-4.5-air',
           AGENT_EVAL_PROVIDER_BASE_URL: 'http://127.0.0.1:4000/v1',
           AGENT_EVAL_PROVIDER_PROTOCOL: 'openai_compatible',
+          AGENT_EVAL_ARTIFACT_DIR: artifactDir,
           LITELLM_API_KEY: 'run-scoped-key',
         },
       });
@@ -440,10 +468,14 @@ describe('MulticaBridgeServer', () => {
       );
       expect(createdSkillIds).toEqual(['marker-skill']);
       expect(output.payloads).toEqual([{ text: 'JustDo answer' }]);
+      expect(
+        fs.readFileSync(path.join(artifactDir, 'generated', 'schematic.kicad_sch'), 'utf8'),
+      ).toBe('fixture');
       expect(output.meta.agentMeta).toEqual({
         sessionId: 'cowork-visible-1',
         sessionKey: 'agent:main:justdo:cowork-visible-1',
         model: 'provider/justdo-model',
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
       });
       expect(responses.at(-1)).toEqual({ type: 'exit', code: 0 });
 

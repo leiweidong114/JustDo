@@ -9,6 +9,7 @@ import path from 'path';
 import type { ExternalSessionStatus } from '../../../shared/multica';
 import { PRODUCT_NAME } from '../../../shared/productMetadata';
 import type { CoworkStore } from '../../data/coworkStore';
+import type { CoworkMessage } from '../../data/coworkStore';
 import type { CoworkEngineRouter } from '../../engine/cowork/coworkEngineRouter';
 import type { OpenClawEngineManager } from '../../openclaw/runtime/openclawEngineManager';
 import { buildManagedSessionKey } from '../../openclaw/sessions/openclawChannelSessionSync';
@@ -129,6 +130,57 @@ const readTimeoutMs = (argv: readonly string[]): number | null => {
   const seconds = Number(argv[index + 1]);
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
   return Math.min(seconds * 1_000 + OPENCLAW_TIMEOUT_GRACE_MS, 2_147_483_647);
+};
+
+const stringifyToolResult = (message: CoworkMessage): string => {
+  if (message.content) return message.content;
+  const value = message.metadata?.toolResult ?? message.metadata?.error ?? '';
+  return typeof value === 'string' ? value : JSON.stringify(value);
+};
+
+export const encodeMulticaTelemetry = (messages: readonly CoworkMessage[]): string => {
+  const events: Record<string, unknown>[] = [];
+  for (const message of messages) {
+    if (message.type === 'tool_use') {
+      events.push({
+        type: 'tool_use',
+        tool: message.metadata?.toolName || 'unknown',
+        callId: message.metadata?.toolUseId || message.id,
+        input: message.metadata?.toolInput || {},
+      });
+    } else if (message.type === 'tool_result') {
+      const isError = Boolean(message.metadata?.isError || message.metadata?.error);
+      const output = stringifyToolResult(message);
+      events.push({
+        type: 'tool_result',
+        tool: message.metadata?.toolName || 'unknown',
+        callId: message.metadata?.toolUseId || message.id,
+        text: isError ? JSON.stringify({ status: 'error', error: message.metadata?.error || output }) : output,
+        status: isError ? 'error' : 'completed',
+      });
+    } else if (message.type === 'subagent_completion') {
+      const callId = message.metadata?.toolUseId || message.id;
+      events.push({ type: 'tool_use', tool: 'subagent_completion', callId, input: {} });
+      events.push({
+        type: 'tool_result',
+        tool: 'subagent_completion',
+        callId,
+        text: stringifyToolResult(message),
+      });
+    }
+  }
+  return events.map(event => JSON.stringify(event)).join('\n');
+};
+
+const archiveEvaluationArtifacts = (cwd: string, destination?: string): void => {
+  if (!destination?.trim()) return;
+  const targetRoot = path.resolve(destination);
+  fs.mkdirSync(targetRoot, { recursive: true });
+  for (const folder of ['generated', 'output', 'outputs', 'artifacts']) {
+    const source = path.resolve(cwd, folder);
+    if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) continue;
+    fs.cpSync(source, path.join(targetRoot, folder), { recursive: true, force: true });
+  }
 };
 
 export interface MulticaBridgeServerOptions {
@@ -617,11 +669,23 @@ export class MulticaBridgeServer {
       if (session?.status === 'error') {
         throw new Error(runtimeError || 'JustDo Agent runtime ended with an error.');
       }
-      const assistant = session?.messages
-        .slice(messageCountBeforeRun)
+      const runMessages = session?.messages.slice(messageCountBeforeRun) ?? [];
+      const assistant = runMessages
         .filter(message => message.type === 'assistant' && message.content.trim())
         .at(-1);
       if (!assistant) throw new Error('JustDo completed without an assistant response.');
+
+      archiveEvaluationArtifacts(cwd, env.AGENT_EVAL_ARTIFACT_DIR);
+      const usage = runMessages.reduce(
+        (total, message) => ({
+          input: total.input + (message.usage?.input ?? 0),
+          output: total.output + (message.usage?.output ?? 0),
+          cacheRead: total.cacheRead + (message.usage?.cacheRead ?? 0),
+          cacheWrite: total.cacheWrite + (message.usage?.cacheWrite ?? 0),
+          total: total.total + (message.usage?.total ?? 0),
+        }),
+        { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      );
 
       const result = {
         payloads: [{ text: assistant.content }],
@@ -631,12 +695,14 @@ export class MulticaBridgeServer {
             sessionId: binding.coworkSessionId,
             sessionKey,
             model: assistant.modelName || agent.model,
+            usage,
           },
         },
       };
+      const telemetry = encodeMulticaTelemetry(runMessages);
       writeResponse(socket, {
         type: 'stdout',
-        data: Buffer.from(`${JSON.stringify(result)}\n`, 'utf8').toString('base64'),
+        data: Buffer.from(`${telemetry ? `${telemetry}\n` : ''}${JSON.stringify(result)}\n`, 'utf8').toString('base64'),
       });
       externalStore.updateRun(binding, 'completed', binding.coworkSessionId, sessionKey);
       writeResponse(socket, { type: 'exit', code: 0 });

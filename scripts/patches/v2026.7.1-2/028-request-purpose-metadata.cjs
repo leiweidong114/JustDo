@@ -3,7 +3,7 @@
 // Capability: isolate session-scoped compaction and exec-review provider metadata.
 // Contract: native/safeguard compaction use context_compaction; reviewers use exec_review.
 // Target: pristine openclaw@2026.7.1-2; patches real runtime call chains, not API aliases.
-// Scope: only model.provider builtin_models over the OpenAI Chat Completions transport.
+// Scope: builtin_models and evaluator-owned agent_eval_* providers over OpenAI Chat Completions.
 // Safety: custom/strict-compatible providers keep native egress; unrelated completions are untouched.
 // Remove when: upstream supports session-scoped per-purpose metadata for all three paths.
 
@@ -81,7 +81,7 @@ function wrapJustDoCompactionTextStream(stream, sessionId) {
 }
 // justdo-compaction-request-metadata: shared native/safeguard egress wrapper.
 function ${COMPACTION_HELPER}(streamFn, model, sessionId) {
-\tif (!sessionId || !justDoLiteLLMCompactionProviders.has(model?.provider) || !justDoLiteLLMCompactionApis.has(model?.api)) return streamFn;
+\tif (!sessionId || !(justDoLiteLLMCompactionProviders.has(model?.provider) || model?.provider?.startsWith("agent_eval_")) || !justDoLiteLLMCompactionApis.has(model?.api)) return streamFn;
 \tconst baseStreamFn = streamFn ?? streamSimple;
 \treturn (runtimeModel, context, options) => wrapJustDoCompactionTextStream(streamWithPayloadPatch(baseStreamFn, runtimeModel, context, options, (payload) => {
 \t\tconst metadata = payload.metadata && typeof payload.metadata === "object" && !Array.isArray(payload.metadata) ? payload.metadata : {};
@@ -190,7 +190,7 @@ function patchSimpleCompletion(content, filePath) {
 const justDoLiteLLMSimpleCompletionApis = new Set(${APIS});
 // justdo-exec-review-request-metadata: isolate reviewer egress from generic completions.
 function ${SIMPLE_HELPER}(model, purpose, sessionId) {
-\tif (!purpose || !sessionId || !justDoLiteLLMSimpleCompletionProviders.has(model?.provider) || !justDoLiteLLMSimpleCompletionApis.has(model?.api)) return model;
+\tif (!purpose || !sessionId || !(justDoLiteLLMSimpleCompletionProviders.has(model?.provider) || model?.provider?.startsWith("agent_eval_")) || !justDoLiteLLMSimpleCompletionApis.has(model?.api)) return model;
 \tconst provider = getApiProvider(model.api);
 \tif (!provider) return model;
 \tconst sourceApi = model.api;
