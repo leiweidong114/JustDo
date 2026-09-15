@@ -42,4 +42,34 @@ describe('Multica HTTP bridge', () => {
       await server.stop();
     }
   });
+
+  test('rejects workspace traversal before invoking the local bridge', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'justdo-http-'));
+    roots.push(root);
+    process.env.JUSTDO_MULTICA_HTTP_PORT = '43131';
+    const server = new MulticaHttpBridgeServer(root);
+    await server.start();
+    try {
+      const metadata = JSON.parse(
+        fs.readFileSync(path.join(root, 'multica', 'http-bridge.json'), 'utf8'),
+      ) as { token: string };
+      const response = await fetch('http://127.0.0.1:43131/v1/invoke', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${metadata.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          argv: ['--version'],
+          cwd: root,
+          workspaceFiles: { '../escape.txt': { data: 'dGVzdA==' } },
+        }),
+      });
+      expect(response.status).toBe(500);
+      expect(await response.json()).toMatchObject({ error: 'invalid_workspace_file' });
+      expect(fs.existsSync(path.join(root, 'escape.txt'))).toBe(false);
+    } finally {
+      await server.stop();
+    }
+  });
 });
