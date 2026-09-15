@@ -68,6 +68,7 @@ import {
   removeAllMulticaEvaluationModels,
   removeMulticaEvaluationModel,
 } from './integrations/multica/multicaEvaluationModel';
+import { MulticaHttpBridgeServer } from './integrations/multica/multicaHttpBridgeServer';
 import { MulticaIntegrationService } from './integrations/multica/multicaIntegrationService';
 import { runMulticaStandalone } from './integrations/multica/multicaStandalone';
 import {
@@ -389,6 +390,7 @@ let openClawStatusForwarderBound = false;
 let openClawGatewayPortProxyBypassBound = false;
 let preventSleepBlockerId: number | null = null;
 let multicaBridgeServer: MulticaBridgeServer | null = null;
+let multicaHttpBridgeServer: MulticaHttpBridgeServer | null = null;
 let multicaIntegrationService: MulticaIntegrationService | null = null;
 
 const initStore = async (): Promise<SqliteStore> => {
@@ -1182,6 +1184,12 @@ if (multicaBridgeArgv) {
     console.log('[Main] App is quitting, starting cleanup...');
     customerRegistrationService?.stop();
     destroyTray();
+    if (multicaHttpBridgeServer) {
+      await multicaHttpBridgeServer.stop().catch(error => {
+        console.error('[MulticaHttpBridge] Failed to stop HTTP relay:', error);
+      });
+      multicaHttpBridgeServer = null;
+    }
     if (multicaBridgeServer) {
       await multicaBridgeServer.stop().catch(error => {
         console.error('[MulticaBridge] Failed to stop relay:', error);
@@ -1398,6 +1406,13 @@ if (multicaBridgeArgv) {
     await multicaBridgeServer.start().catch(error => {
       console.error('[MulticaBridge] Failed to start relay:', error);
     });
+    if (multicaBridgeServer.running) {
+      multicaHttpBridgeServer = new MulticaHttpBridgeServer(app.getPath('userData'));
+      await multicaHttpBridgeServer.start().catch(error => {
+        multicaHttpBridgeServer = null;
+        console.error('[MulticaHttpBridge] Failed to start HTTP relay:', error);
+      });
+    }
 
     if (startupSync.success) {
       void ensureOpenClawRunningForCowork()
