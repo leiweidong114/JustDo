@@ -16,6 +16,11 @@ const { readWindowsUpdateConfig } = require('./scripts/windows-update-config.cjs
 
 const { appId, productName } = resolveBuilderProductMetadata(packageJson.productName);
 const windowsUpdateConfig = readWindowsUpdateConfig();
+const openClawNodeModulesResource = {
+  from: 'vendor/openclaw-runtime/current/node_modules',
+  to: 'cfmind/node_modules',
+  filter: ['**/*'],
+};
 
 module.exports = {
   ...baseConfig,
@@ -41,6 +46,7 @@ module.exports = {
   ],
   mac: {
     ...baseConfig.mac,
+    extraResources: [...(baseConfig.mac.extraResources || []), openClawNodeModulesResource],
     extendInfo: {
       ...baseConfig.mac.extendInfo,
       NSCalendarsUsageDescription: `${productName} 需要访问您的日历来帮助您查看和管理日程安排，例如查找事件、创建会议等。`,
@@ -54,6 +60,10 @@ module.exports = {
   },
   linux: {
     ...baseConfig.linux,
+    extraResources: [...(baseConfig.linux.extraResources || []), openClawNodeModulesResource],
+    executableName: productName,
+    syncDesktopName: true,
+    category: 'Utility',
     desktop: {
       ...baseConfig.linux.desktop,
       entry: {
@@ -61,5 +71,10 @@ module.exports = {
         Name: productName,
       },
     },
+  },
+  deb: {
+    ...baseConfig.deb,
+    afterInstall: 'scripts/linux-after-install.sh',
+    afterRemove: 'scripts/linux-after-remove.sh',
   },
 };

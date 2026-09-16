@@ -6,6 +6,7 @@ import { expect, test } from 'vitest';
 const electronBuilderConfig = require('../../electron-builder.config.cjs') as {
   asarUnpack?: string[];
   files?: Array<string | { from: string; filter: string[] }>;
+  linux?: { extraResources?: Array<{ from: string; to: string }> };
   npmRebuild?: boolean;
 };
 
@@ -18,6 +19,10 @@ test('relies on the npm predist:win lifecycle without invoking it twice', () => 
     'npm run clean:release && npm run openclaw:runtime:win-x64',
   );
   expect(packageJson.scripts['dist:win']).not.toContain('npm run predist:win');
+  expect(packageJson.scripts['predist:linux']).toBe(
+    'npm run clean:release && npm run openclaw:runtime:linux-x64',
+  );
+  expect(packageJson.scripts['dist:linux']).toContain('npm run verify:linux-release');
 });
 
 test('keeps Electron readiness probes quiet and bounded', () => {
@@ -28,6 +33,32 @@ test('keeps Electron readiness probes quiet and bounded', () => {
 
   expect(devRunner).toContain('wait-on -t 120000 -d 20000 --simultaneous 1');
   expect(devRunner).not.toContain('wait-on -v');
+});
+
+test('packages Linux launchers that work after installation and without FUSE', () => {
+  const builderHooks = fs.readFileSync(
+    path.resolve(__dirname, '../../scripts/electron-builder-hooks.cjs'),
+    'utf8',
+  );
+
+  expect(builderHooks).toContain('LAUNCHER_PATH=$(readlink -f -- "$0"');
+  expect(builderHooks).toContain('libfuse.so.2');
+  expect(builderHooks).toContain('--appimage-extract >/dev/null');
+  expect(builderHooks).toContain('exec "$CACHE_DIR/AppRun" --justdo-multica-bridge');
+  expect(electronBuilderConfig.linux?.extraResources).toContainEqual(
+    expect.objectContaining({
+      from: 'vendor/openclaw-runtime/current/node_modules',
+      to: 'cfmind/node_modules',
+    }),
+  );
+});
+
+test('cleans stale run-scoped providers before standalone Agent startup', () => {
+  const mainSource = fs.readFileSync(path.resolve(__dirname, '../../src/main/main.ts'), 'utf8');
+
+  expect(mainSource).toContain("reason: 'multicaEvaluationModelCleanup'");
+  expect(mainSource).toContain('removeAllMulticaEvaluationModels(storedAppConfig)');
+  expect(mainSource).not.toContain("reason: 'multicaStandaloneEvaluationModelCleanup'");
 });
 
 test('builds the Multica development launcher without coupling it to the renderer build', () => {
@@ -129,7 +160,7 @@ test('uses a target-aware and runtime-verified Electron-native rebuild', () => {
   expect(builderHooks).toContain('rebuildElectronNativeModules(context)');
   expect(builderHooks).toContain('context.electronPlatformName');
   expect(builderHooks).toContain('resolveTargetArch(context)');
-  expect(builderHooks).toContain('verifyPackagedWindowsNativeModules(context)');
+  expect(builderHooks).toContain('verifyPackagedNativeModules(context)');
   expect(builderHooks).toContain("'better_sqlite3.node'");
   expect(builderHooks).toContain('Packaged better-sqlite3 failed Electron ABI verification');
 });

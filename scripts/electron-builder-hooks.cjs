@@ -13,6 +13,7 @@ const {
   cpSync,
   lstatSync,
   writeFileSync,
+  chmodSync,
 } = require('fs');
 const { spawnSync } = require('child_process');
 const { createHash } = require('crypto');
@@ -43,6 +44,26 @@ function isWindowsTarget(context) {
 
 function isMacTarget(context) {
   return context?.electronPlatformName === 'darwin';
+}
+
+function isLinuxTarget(context) {
+  return context?.electronPlatformName === 'linux';
+}
+
+function createLinuxMulticaAgentLauncher(appOutDir, productFilename) {
+  const launcherPath = path.join(appOutDir, `${productFilename}-agent`);
+  const content = [
+    '#!/bin/sh',
+    `# ${productFilename}-managed-multica-launcher-v1`,
+    'LAUNCHER_PATH=$(readlink -f -- "$0" 2>/dev/null || printf "%s" "$0")',
+    'SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$LAUNCHER_PATH")" && pwd)',
+    `exec "$SCRIPT_DIR/${productFilename}" --justdo-multica-bridge "$@"`,
+    '',
+  ].join('\n');
+  writeFileSync(launcherPath, content, { mode: 0o755 });
+  chmodSync(launcherPath, 0o755);
+  console.log(`[electron-builder-hooks] Created Linux Multica Agent: ${launcherPath}`);
+  return launcherPath;
 }
 
 function rebuildElectronNativeModules(context) {
@@ -831,8 +852,16 @@ async function afterPack(context) {
   await verifyPackagedOpenClawRuntime(context);
   verifyPackagedBrowserExtension(context);
 
+  if (isLinuxTarget(context)) {
+    verifyPackagedNativeModules(context);
+    createLinuxMulticaAgentLauncher(
+      context.appOutDir,
+      context.packager.appInfo.productFilename,
+    );
+  }
+
   if (isWindowsTarget(context)) {
-    verifyPackagedWindowsNativeModules(context);
+    verifyPackagedNativeModules(context);
     const productFilename = context.packager.appInfo.productFilename;
     const productExecutablePath = path.join(context.appOutDir, `${productFilename}.exe`);
     const agentExecutablePath = path.join(context.appOutDir, `${productFilename}-agent.exe`);
@@ -925,11 +954,11 @@ function verifyPackagedNodeRuntime(context) {
   }
 }
 
-function verifyPackagedWindowsNativeModules(context) {
+function verifyPackagedNativeModules(context) {
   const targetArch = resolveTargetArch(context);
-  if (process.platform !== 'win32' || targetArch !== process.arch) {
+  if (process.platform !== context.electronPlatformName || targetArch !== process.arch) {
     console.log(
-      `[electron-builder-hooks] Skipping packaged native runtime verification for win32-${targetArch}; ` +
+      `[electron-builder-hooks] Skipping packaged native runtime verification for ${context.electronPlatformName}-${targetArch}; ` +
         `the host is ${process.platform}-${process.arch}.`,
     );
     return;
@@ -1176,7 +1205,49 @@ async function afterAllArtifactBuild(context) {
   const buildsWindows = Array.from(context?.platformToTargets?.keys?.() || []).some(
     platform => platform?.nodeName === 'win32',
   );
-  if (!buildsWindows) return [];
+  const buildsLinux = Array.from(context?.platformToTargets?.keys?.() || []).some(
+    platform => platform?.nodeName === 'linux',
+  );
+
+  const additionalArtifacts = [];
+  if (buildsLinux) {
+    const appImagePath = context.artifactPaths.find(artifactPath =>
+      artifactPath.endsWith('.AppImage'),
+    );
+    if (!appImagePath) {
+      throw new Error('[electron-builder-hooks] Linux build did not produce an AppImage.');
+    }
+    const launcherPath = path.join(context.outDir, 'JustDo-agent-linux-x64');
+    const appImageName = path.basename(appImagePath);
+    const cacheName = appImageName.replace(/[^A-Za-z0-9._-]/g, '_');
+    const launcher = [
+      '#!/bin/sh',
+      '# JustDo-managed-multica-launcher-v1',
+      'SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)',
+      `APPIMAGE="$SCRIPT_DIR/${appImageName}"`,
+      'if ! ldconfig -p 2>/dev/null | grep -q "libfuse.so.2"; then',
+      `  CACHE_DIR="\${XDG_CACHE_HOME:-\$HOME/.cache}/justdo-appimage-${cacheName}"`,
+      '  if [ ! -x "$CACHE_DIR/AppRun" ]; then',
+      '    STAGING="$CACHE_DIR.tmp.$$"',
+      '    rm -rf "$STAGING"',
+      '    mkdir -p "$STAGING"',
+      '    (cd "$STAGING" && "$APPIMAGE" --appimage-extract >/dev/null)',
+      '    rm -rf "$CACHE_DIR"',
+      '    mv "$STAGING/squashfs-root" "$CACHE_DIR"',
+      '    rmdir "$STAGING"',
+      '  fi',
+      '  exec "$CACHE_DIR/AppRun" --justdo-multica-bridge "$@"',
+      'fi',
+      'exec "$APPIMAGE" --justdo-multica-bridge "$@"',
+      '',
+    ].join('\n');
+    writeFileSync(launcherPath, launcher, { mode: 0o755 });
+    chmodSync(launcherPath, 0o755);
+    additionalArtifacts.push(launcherPath);
+    console.log(`[electron-builder-hooks] Generated portable Linux Agent launcher: ${launcherPath}`);
+  }
+
+  if (!buildsWindows) return additionalArtifacts;
 
   const repoRoot = path.join(__dirname, '..');
   const packageMetadata = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
@@ -1187,7 +1258,7 @@ async function afterAllArtifactBuild(context) {
     packageVersion: packageMetadata.version,
     releaseNotesPath,
   });
-  return [manifestPath];
+  return [...additionalArtifacts, manifestPath];
 }
 
 async function verifyPackagedOpenClawRuntime(context) {
@@ -1242,12 +1313,19 @@ async function verifyPackagedOpenClawRuntime(context) {
       rmSync(temporaryRoot, { recursive: true, force: true });
     }
   } else {
-    verifyOpenClawPatchManifest(path.join(resourcesRoot, 'cfmind'), {
+    const packagedRuntimeRoot = path.join(resourcesRoot, 'cfmind');
+    verifyOpenClawPatchManifest(packagedRuntimeRoot, {
       expectedTarget: resolveOpenClawRuntimeTargetId(context),
       // gateway.asar is a build-time source artifact. The packaged runtime
       // intentionally ships the audited gateway bundle instead, on every OS.
       allowOmittedGatewayAsar: true,
     });
+    verifyRequiredPathSet(
+      packagedRuntimeRoot,
+      ['node_modules/json5/package.json'],
+      'Packaged OpenClaw production dependencies',
+      getOpenClawRuntimeBuildHint(resolveOpenClawRuntimeTargetId(context)),
+    );
   }
 
   console.log('[electron-builder-hooks] Verified patches in packaged OpenClaw runtime.');
@@ -1265,7 +1343,8 @@ module.exports = {
   verifyWindowsInstallerArchive,
   verifyWindowsInstallerArchiveListing,
   verifyPackagedNodeRuntime,
-  verifyPackagedWindowsNativeModules,
+  verifyPackagedNativeModules,
+  createLinuxMulticaAgentLauncher,
   verifyPackagedOpenClawRuntime,
   verifyPackagedBrowserExtension,
 };

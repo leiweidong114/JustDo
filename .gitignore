@@ -1,6 +1,7 @@
 /build/
 release/
 release-linux/
+release-linux-*/
 release-windows/
 node_modules
 dist

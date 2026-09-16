@@ -851,6 +851,24 @@ if (multicaBridgeArgv) {
     store = await initStore();
     setStoreGetter(() => store);
     try {
+      // A force-killed evaluation can leave its run-scoped provider in SQLite and
+      // openclaw.json while the plaintext key intentionally was never persisted.
+      // Clean and sync before provisioning the next request so the Gateway cannot
+      // enter a missing-secret restart loop on Linux or any other platform.
+      const appStore = getStore();
+      const storedAppConfig = appStore.get<Record<string, unknown>>('app_config') ?? {};
+      appStore.set('app_config', removeAllMulticaEvaluationModels(storedAppConfig));
+      const standaloneStartupSync = await syncOpenClawConfig({
+        // Reuse the cleanup sync mode so a provider written by a process that
+        // was force-killed is removed from openclaw.json as well as SQLite.
+        reason: 'multicaEvaluationModelCleanup',
+      });
+      if (!standaloneStartupSync.success) {
+        throw new Error(
+          standaloneStartupSync.error ||
+            'JustDo could not clean up stale evaluation providers before startup.',
+        );
+      }
       return await runMulticaStandalone(
         {
           userDataPath: app.getPath('userData'),
@@ -887,7 +905,9 @@ if (multicaBridgeArgv) {
             const current = appStore.get<Record<string, unknown>>('app_config') ?? {};
             appStore.set('app_config', removeMulticaEvaluationModel(current, providerId));
             const syncResult = await syncOpenClawConfig({
-              reason: 'multicaStandaloneEvaluationModelCleanup',
+              // The config synchronizer uses this reason to remove the
+              // run-scoped provider and its model references from openclaw.json.
+              reason: 'multicaEvaluationModelCleanup',
             });
             if (!syncResult.success) {
               throw new Error(

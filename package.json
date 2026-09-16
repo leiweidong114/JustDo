@@ -1,8 +1,10 @@
 {
   "name": "justdo",
   "productName": "JustDo",
+  "desktopName": "JustDo",
   "private": true,
   "description": "AI-powered assistant application",
+  "homepage": "https://github.com/leiweidong114/JustDo",
   "author": {
     "name": "JustDo",
     "email": "liangxhao@example.com"
@@ -54,8 +56,9 @@
     "dist:mac:universal": "npm run build && npm run compile:electron && electron-builder --config electron-builder.config.cjs --mac --universal",
     "predist:win": "npm run clean:release && npm run openclaw:runtime:win-x64",
     "dist:win": "npm run setup:mingit && npm run setup:python-runtime && npm run build && npm run compile:electron && electron-builder --config electron-builder.config.cjs --win --x64",
-    "predist:linux": "npm run openclaw:runtime:linux-x64",
-    "dist:linux": "npm run build && npm run compile:electron && electron-builder --config electron-builder.config.cjs --linux",
+    "predist:linux": "npm run clean:release && npm run openclaw:runtime:linux-x64",
+    "dist:linux": "npm run build && npm run compile:electron && electron-builder --config electron-builder.config.cjs --linux && npm run verify:linux-release",
+    "verify:linux-release": "node scripts/verify-linux-release.cjs release",
     "clean:release": "rimraf release",
     "generate:tray-icons": "node scripts/generate-icons.cjs tray-icons",
     "generate:app-icon:win": "node scripts/generate-icons.cjs app-icon",

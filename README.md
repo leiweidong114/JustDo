@@ -96,6 +96,17 @@ npm run dist:mac
 npm run dist:linux
 ```
 
+Linux release 同时生成 AppImage、Deb、`linux-unpacked/JustDo-agent`、便携
+`JustDo-agent-linux-x64` 和 `SHA256SUMS-linux.txt`。推荐在目标机安装 Deb：
+
+```bash
+sudo apt install ./release/justdo_*_amd64.deb
+JustDo-agent --version
+```
+
+不安装 Deb 时，把 `JustDo-agent-linux-x64` 与 AppImage 放在同一目录并赋予执行权限；
+评测系统应指向 launcher，而不是直接把 AppImage 当作 Agent 命令。
+
 Windows packaging prepares MinGit and a Python runtime through the scripts in
 `scripts/`. Production packages include the runtime resources needed by the app,
 including locked `requests`, `PyYAML`, `openpyxl`, `pypdf`, and `beautifulsoup4`
