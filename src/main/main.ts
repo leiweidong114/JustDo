@@ -67,6 +67,7 @@ import {
   addMulticaEvaluationModel,
   removeAllMulticaEvaluationModels,
   removeMulticaEvaluationModel,
+  removeMulticaEvaluationModels,
 } from './integrations/multica/multicaEvaluationModel';
 import { MulticaHttpBridgeServer } from './integrations/multica/multicaHttpBridgeServer';
 import { MulticaIntegrationService } from './integrations/multica/multicaIntegrationService';
@@ -915,6 +916,19 @@ if (multicaBridgeArgv) {
               );
             }
           },
+          releaseEvaluationModels: async providerIds => {
+            const appStore = getStore();
+            const current = appStore.get<Record<string, unknown>>('app_config') ?? {};
+            appStore.set('app_config', removeMulticaEvaluationModels(current, providerIds));
+            const syncResult = await syncOpenClawConfig({
+              reason: 'multicaEvaluationModelCleanup',
+            });
+            if (!syncResult.success) {
+              throw new Error(
+                syncResult.error || 'JustDo could not clean up temporary evaluation models.',
+              );
+            }
+          },
           onSessionsChanged: () => undefined,
         },
         multicaBridgeArgv,
@@ -1393,10 +1407,7 @@ if (multicaBridgeArgv) {
         const syncResult = await syncOpenClawConfig({ reason: 'multicaEvaluationModel' });
         if (!syncResult.success) {
           const latest = store.get<Record<string, unknown>>('app_config') ?? {};
-          store.set(
-            'app_config',
-            removeMulticaEvaluationModel(latest, registration.providerId),
-          );
+          store.set('app_config', removeMulticaEvaluationModel(latest, registration.providerId));
           throw new Error(
             syncResult.error || 'JustDo could not apply the temporary evaluation model.',
           );
@@ -1414,6 +1425,17 @@ if (multicaBridgeArgv) {
         if (!syncResult.success) {
           throw new Error(
             syncResult.error || 'JustDo could not clean up the temporary evaluation model.',
+          );
+        }
+      },
+      releaseEvaluationModels: async providerIds => {
+        const store = getStore();
+        const current = store.get<Record<string, unknown>>('app_config') ?? {};
+        store.set('app_config', removeMulticaEvaluationModels(current, providerIds));
+        const syncResult = await syncOpenClawConfig({ reason: 'multicaEvaluationModelCleanup' });
+        if (!syncResult.success) {
+          throw new Error(
+            syncResult.error || 'JustDo could not clean up temporary evaluation models.',
           );
         }
       },

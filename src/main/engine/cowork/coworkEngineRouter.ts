@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 
+import type { GoalExecutionSnapshot } from '../../../shared/sessionGoal';
 import type {
   CoworkContinueOptions,
   CoworkGenerateTitleOptions,
@@ -158,6 +159,10 @@ export class CoworkEngineRouter extends EventEmitter implements CoworkRuntime {
       ),
     );
     return Object.fromEntries(entries);
+  }
+
+  getGoalExecution(sessionId: string): GoalExecutionSnapshot | null {
+    return this.runtime.getGoalExecution?.(sessionId) ?? null;
   }
 
   /** No-op: only 'openclaw' engine exists, engine switching is not applicable. */

@@ -8,6 +8,7 @@ import path from 'path';
 
 import type { ExternalSessionStatus } from '../../../shared/multica';
 import { PRODUCT_NAME } from '../../../shared/productMetadata';
+import { GoalExecutionPhase, type GoalExecutionSnapshot } from '../../../shared/sessionGoal';
 import type { CoworkStore } from '../../data/coworkStore';
 import type { CoworkMessage } from '../../data/coworkStore';
 import type { CoworkEngineRouter } from '../../engine/cowork/coworkEngineRouter';
@@ -36,6 +37,39 @@ const MAX_STDOUT_CAPTURE_BYTES = 4 * 1024 * 1024;
 const OPENCLAW_TIMEOUT_GRACE_MS = 250;
 const BUNDLED_RUNTIME_VERSION_PATTERN = /\b(20\d{2}\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b/;
 const LOG_PREFIX = '[MulticaBridge]';
+const GOAL_COMMAND_PATTERN = /^\s*\/goal(?:\s|$)/i;
+const GOAL_STATE_POLL_MS = 250;
+const GOAL_STATE_DISCOVERY_GRACE_MS = 5_000;
+
+const isTerminalGoalExecution = (snapshot: GoalExecutionSnapshot): boolean =>
+  snapshot.phase === GoalExecutionPhase.AwaitingConfirmation ||
+  snapshot.phase === GoalExecutionPhase.AwaitingInput;
+
+const wait = (durationMs: number): Promise<void> =>
+  new Promise(resolve => setTimeout(resolve, durationMs));
+
+export async function waitForMulticaGoalCompletion(
+  router: CoworkEngineRouter,
+  sessionId: string,
+  options: { discoveryGraceMs?: number } = {},
+): Promise<GoalExecutionSnapshot | null> {
+  const discoveryDeadline =
+    Date.now() + (options.discoveryGraceMs ?? GOAL_STATE_DISCOVERY_GRACE_MS);
+  let discovered = false;
+  while (true) {
+    const snapshot = router.getGoalExecution(sessionId);
+    if (snapshot) {
+      discovered = true;
+      if (isTerminalGoalExecution(snapshot)) return snapshot;
+      if (snapshot.phase === GoalExecutionPhase.Stopped) {
+        throw new Error(snapshot.error || 'JustDo Goal execution stopped before completion.');
+      }
+    } else if (!discovered && Date.now() >= discoveryDeadline) {
+      return null;
+    }
+    await wait(GOAL_STATE_POLL_MS);
+  }
+}
 
 const describeBridgeArgv = (
   argv: readonly string[],
@@ -155,7 +189,9 @@ export const encodeMulticaTelemetry = (messages: readonly CoworkMessage[]): stri
         type: 'tool_result',
         tool: message.metadata?.toolName || 'unknown',
         callId: message.metadata?.toolUseId || message.id,
-        text: isError ? JSON.stringify({ status: 'error', error: message.metadata?.error || output }) : output,
+        text: isError
+          ? JSON.stringify({ status: 'error', error: message.metadata?.error || output })
+          : output,
         status: isError ? 'error' : 'completed',
       });
     } else if (message.type === 'subagent_completion') {
@@ -198,6 +234,7 @@ export interface MulticaBridgeServerOptions {
     protocol?: string;
   }) => Promise<{ providerId: string; modelRef: string }>;
   releaseEvaluationModel?: (providerId: string) => Promise<void>;
+  releaseEvaluationModels?: (providerIds: string[]) => Promise<void>;
   onSessionsChanged: () => void;
 }
 
@@ -227,6 +264,8 @@ export class MulticaBridgeServer {
   private server: net.Server | null = null;
   private readonly children = new Set<ChildProcess>();
   private readonly activeCoworkSessions = new Set<string>();
+  private readonly pendingEvaluationProviderReleases = new Set<string>();
+  private evaluationProviderCleanup: Promise<void> = Promise.resolve();
   private token = '';
 
   constructor(private readonly options: MulticaBridgeServerOptions) {}
@@ -412,13 +451,7 @@ export class MulticaBridgeServer {
       }
       if (argv[0] === 'agent') {
         const requestEnvironment = sanitizeMulticaBridgeEnvironment(request.env || {});
-        await this.runCoworkAgentRequest(
-          request.requestId,
-          argv,
-          cwd,
-          requestEnvironment,
-          socket,
-        );
+        await this.runCoworkAgentRequest(request.requestId, argv, cwd, requestEnvironment, socket);
         return null;
       }
       const cli = await engineManager.buildCliEnvironment();
@@ -543,6 +576,9 @@ export class MulticaBridgeServer {
     env: Record<string, string>,
     socket: net.Socket,
   ): Promise<void> {
+    // Do not provision a new run-scoped provider while cleanup from the
+    // previous idle period is still mutating OpenClaw configuration.
+    await this.evaluationProviderCleanup;
     const promptIndex = argv.indexOf('--message');
     const prompt = promptIndex >= 0 ? (argv[promptIndex + 1] ?? '') : '';
     if (!prompt.trim()) throw new Error('Multica agent request is missing a message.');
@@ -571,7 +607,6 @@ export class MulticaBridgeServer {
     const messageCountBeforeRun = store.getSession(binding.coworkSessionId)?.messages.length ?? 0;
     const startedAt = Date.now();
     let timedOut = false;
-    let disconnected = socket.destroyed;
     let runtimeError: string | null = null;
     const onRuntimeError = (sessionId: string, error: string): void => {
       if (sessionId === binding.coworkSessionId) runtimeError = error;
@@ -583,8 +618,13 @@ export class MulticaBridgeServer {
         .catch((): void => undefined);
     };
     const onSocketClose = (): void => {
-      disconnected = true;
-      stopSession();
+      // The transport connection is not the task owner. Keep the persisted
+      // Cowork/Goal session alive so a temporary relay disconnect does not
+      // destroy long-running work. Explicit timeouts and server shutdown still
+      // stop the session.
+      console.info(`${LOG_PREFIX} Client disconnected; Cowork session continues.`, {
+        sessionId: binding.coworkSessionId,
+      });
     };
     socket.once('close', onSocketClose);
     this.activeCoworkSessions.add(binding.coworkSessionId);
@@ -626,10 +666,7 @@ export class MulticaBridgeServer {
           // when a same-named model exists in JustDo; otherwise the run can
           // silently bypass LiteLLM/model verification or inherit a stale
           // custom provider reference.
-          modelRef = resolveMulticaEvaluationModelRef(
-            this.options.getDatabase(),
-            requestedModel,
-          );
+          modelRef = resolveMulticaEvaluationModelRef(this.options.getDatabase(), requestedModel);
         }
       }
 
@@ -654,6 +691,7 @@ export class MulticaBridgeServer {
           );
         }
       }
+      const goalRequested = GOAL_COMMAND_PATTERN.test(prompt);
       const runPromise = binding.created
         ? router.startSession(binding.coworkSessionId, prompt, {
             skillIds,
@@ -662,11 +700,25 @@ export class MulticaBridgeServer {
             agentId,
           })
         : router.continueSession(binding.coworkSessionId, prompt, { skillIds });
-      await (timeoutMs ? Promise.race([runPromise, timeoutPromise]) : runPromise);
-      if (disconnected) throw new Error('Multica client disconnected from the JustDo session.');
+      let initialRunError: unknown = null;
+      try {
+        await (timeoutMs ? Promise.race([runPromise, timeoutPromise]) : runPromise);
+      } catch (error) {
+        initialRunError = error;
+        if (!goalRequested) throw error;
+      }
+
+      let goalCompletion: GoalExecutionSnapshot | null = null;
+      if (goalRequested) {
+        const goalPromise = waitForMulticaGoalCompletion(router, binding.coworkSessionId);
+        goalCompletion = await (timeoutMs
+          ? Promise.race([goalPromise, timeoutPromise])
+          : goalPromise);
+        if (!goalCompletion && initialRunError) throw initialRunError;
+      }
 
       const session = store.getSession(binding.coworkSessionId);
-      if (session?.status === 'error') {
+      if (session?.status === 'error' && !goalCompletion) {
         throw new Error(runtimeError || 'JustDo Agent runtime ended with an error.');
       }
       const runMessages = session?.messages.slice(messageCountBeforeRun) ?? [];
@@ -702,20 +754,23 @@ export class MulticaBridgeServer {
       const telemetry = encodeMulticaTelemetry(runMessages);
       writeResponse(socket, {
         type: 'stdout',
-        data: Buffer.from(`${telemetry ? `${telemetry}\n` : ''}${JSON.stringify(result)}\n`, 'utf8').toString('base64'),
+        data: Buffer.from(
+          `${telemetry ? `${telemetry}\n` : ''}${JSON.stringify(result)}\n`,
+          'utf8',
+        ).toString('base64'),
       });
       externalStore.updateRun(binding, 'completed', binding.coworkSessionId, sessionKey);
       writeResponse(socket, { type: 'exit', code: 0 });
       socket.end();
     } catch (error) {
-      if (timedOut || disconnected) {
+      if (timedOut) {
         await router
           .stopSession(binding.coworkSessionId, { bestEffort: true })
           .catch((): void => undefined);
       }
       externalStore.updateRun(
         binding,
-        timedOut ? 'timeout' : disconnected ? 'cancelled' : 'error',
+        timedOut ? 'timeout' : 'error',
         binding.coworkSessionId,
         sessionKey,
       );
@@ -726,13 +781,37 @@ export class MulticaBridgeServer {
       router.off('error', onRuntimeError);
       this.activeCoworkSessions.delete(binding.coworkSessionId);
       this.options.onSessionsChanged();
-      if (temporaryProviderId && this.options.releaseEvaluationModel) {
-        await this.options.releaseEvaluationModel(temporaryProviderId).catch(error => {
-          console.warn(`${LOG_PREFIX} Failed to clean up a temporary evaluation model.`, {
-            category: error instanceof Error ? error.name : 'UNKNOWN_ERROR',
-          });
-        });
+      if (temporaryProviderId) {
+        this.pendingEvaluationProviderReleases.add(temporaryProviderId);
       }
+      if (this.activeCoworkSessions.size === 0 && this.pendingEvaluationProviderReleases.size > 0) {
+        const providerIds = [...this.pendingEvaluationProviderReleases];
+        this.pendingEvaluationProviderReleases.clear();
+        this.evaluationProviderCleanup = this.releaseEvaluationProviders(providerIds);
+        await this.evaluationProviderCleanup;
+      }
+    }
+  }
+
+  private async releaseEvaluationProviders(providerIds: string[]): Promise<void> {
+    try {
+      if (this.options.releaseEvaluationModels) {
+        await this.options.releaseEvaluationModels(providerIds);
+        return;
+      }
+      if (this.options.releaseEvaluationModel) {
+        for (const providerId of providerIds) {
+          await this.options.releaseEvaluationModel(providerId);
+        }
+      }
+    } catch (error) {
+      for (const providerId of providerIds) {
+        this.pendingEvaluationProviderReleases.add(providerId);
+      }
+      console.warn(`${LOG_PREFIX} Failed to clean up temporary evaluation models.`, {
+        count: providerIds.length,
+        category: error instanceof Error ? error.name : 'UNKNOWN_ERROR',
+      });
     }
   }
 

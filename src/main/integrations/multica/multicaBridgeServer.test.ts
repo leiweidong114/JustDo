@@ -1,11 +1,12 @@
-import fs from 'fs';
 import { EventEmitter } from 'events';
+import fs from 'fs';
 import net from 'net';
 import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import { PRODUCT_NAME } from '../../../shared/productMetadata';
+import { GoalExecutionPhase } from '../../../shared/sessionGoal';
 import type { CoworkMessage, CoworkStore } from '../../data/coworkStore';
 import type { CoworkEngineRouter } from '../../engine/cowork/coworkEngineRouter';
 import type { OpenClawEngineManager } from '../../openclaw/runtime/openclawEngineManager';
@@ -24,24 +25,38 @@ import {
   MulticaBridgeServer,
   normalizeMulticaVersionProbeOutput,
   resolveMulticaEvaluationModelRef,
+  waitForMulticaGoalCompletion,
 } from './multicaBridgeServer';
 
 test('encodes tool and subagent messages as Multica NDJSON telemetry', () => {
   const messages = [
     {
-      id: 'call-1', type: 'tool_use', content: '', timestamp: 1,
+      id: 'call-1',
+      type: 'tool_use',
+      content: '',
+      timestamp: 1,
       metadata: { toolName: 'read', toolUseId: 'call-1', toolInput: { path: 'a.txt' } },
     },
     {
-      id: 'result-1', type: 'tool_result', content: 'file body', timestamp: 2,
+      id: 'result-1',
+      type: 'tool_result',
+      content: 'file body',
+      timestamp: 2,
       metadata: { toolName: 'read', toolUseId: 'call-1' },
     },
     {
-      id: 'child-1', type: 'subagent_completion', content: 'child answer', timestamp: 3,
+      id: 'child-1',
+      type: 'subagent_completion',
+      content: 'child answer',
+      timestamp: 3,
     },
   ] as CoworkMessage[];
 
-  expect(encodeMulticaTelemetry(messages).split('\n').map(line => JSON.parse(line))).toEqual([
+  expect(
+    encodeMulticaTelemetry(messages)
+      .split('\n')
+      .map(line => JSON.parse(line)),
+  ).toEqual([
     { type: 'tool_use', tool: 'read', callId: 'call-1', input: { path: 'a.txt' } },
     { type: 'tool_result', tool: 'read', callId: 'call-1', text: 'file body', status: 'completed' },
     { type: 'tool_use', tool: 'subagent_completion', callId: 'child-1', input: {} },
@@ -83,6 +98,53 @@ const exchange = (
   });
 
 describe('MulticaBridgeServer', () => {
+  test('waits across Goal retries until the Goal reaches a terminal state', async () => {
+    const snapshots = [
+      {
+        sessionId: 'session-1',
+        phase: GoalExecutionPhase.Running,
+        continuationCount: 0,
+        updatedAt: 1,
+      },
+      {
+        sessionId: 'session-1',
+        phase: GoalExecutionPhase.Retrying,
+        continuationCount: 0,
+        updatedAt: 2,
+      },
+      {
+        sessionId: 'session-1',
+        phase: GoalExecutionPhase.AwaitingConfirmation,
+        continuationCount: 1,
+        updatedAt: 3,
+      },
+    ];
+    const getGoalExecution = vi.fn(() => snapshots.shift() ?? snapshots.at(-1) ?? null);
+    const result = await waitForMulticaGoalCompletion(
+      { getGoalExecution } as unknown as CoworkEngineRouter,
+      'session-1',
+    );
+
+    expect(result?.phase).toBe(GoalExecutionPhase.AwaitingConfirmation);
+    expect(getGoalExecution).toHaveBeenCalledTimes(3);
+  });
+
+  test('reports a stopped Goal instead of returning an incomplete run', async () => {
+    const router = {
+      getGoalExecution: () => ({
+        sessionId: 'session-1',
+        phase: GoalExecutionPhase.Stopped,
+        continuationCount: 25,
+        updatedAt: 1,
+        error: 'Maximum automatic goal continuation turns reached (25)',
+      }),
+    } as unknown as CoworkEngineRouter;
+
+    await expect(waitForMulticaGoalCompletion(router, 'session-1')).rejects.toThrow(
+      'Maximum automatic goal continuation turns reached (25)',
+    );
+  });
+
   test('normalizes version output without exposing the Electron Node version', () => {
     expect(
       normalizeMulticaVersionProbeOutput(
@@ -388,6 +450,7 @@ describe('MulticaBridgeServer', () => {
       modelRef: 'agent_eval_temporary/glm-4.5-air',
     }));
     const releaseEvaluationModel = vi.fn(async () => undefined);
+    const releaseEvaluationModels = vi.fn(async () => undefined);
     const buildCliEnvironment = vi.fn();
     const server = new MulticaBridgeServer({
       userDataPath,
@@ -398,6 +461,7 @@ describe('MulticaBridgeServer', () => {
       getDatabase: () => db,
       provisionEvaluationModel,
       releaseEvaluationModel,
+      releaseEvaluationModels,
       onSessionsChanged: vi.fn(),
     });
 
@@ -456,7 +520,8 @@ describe('MulticaBridgeServer', () => {
         apiKey: 'run-scoped-key',
         protocol: 'openai_compatible',
       });
-      expect(releaseEvaluationModel).toHaveBeenCalledWith('agent_eval_temporary');
+      expect(releaseEvaluationModels).toHaveBeenCalledWith(['agent_eval_temporary']);
+      expect(releaseEvaluationModel).not.toHaveBeenCalled();
       expect(startSession).toHaveBeenCalledWith(
         'cowork-visible-1',
         'Use the staged skill',
@@ -580,6 +645,111 @@ describe('MulticaBridgeServer', () => {
       expect(responses.at(-1)).toEqual({ type: 'exit', code: 0 });
     } finally {
       await server.stop();
+    }
+  });
+
+  test('keeps a Cowork agent task running when the relay client disconnects', async () => {
+    const userDataPath = createDirectory();
+    const Database = (await import('better-sqlite3')).default;
+    const db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE cowork_external_sessions (
+        source TEXT, external_session_key TEXT, cowork_session_id TEXT,
+        openclaw_session_id TEXT, openclaw_session_key TEXT, cwd TEXT,
+        status TEXT, created_at INTEGER, updated_at INTEGER,
+        PRIMARY KEY (source, external_session_key)
+      );
+    `);
+    const session = {
+      id: 'cowork-detached-1',
+      status: 'running',
+      messages: [] as Array<{ type: 'user' | 'assistant'; content: string }>,
+    };
+    const coworkStore = {
+      getAgent: () => ({ id: 'main', model: 'provider/model' }),
+      createSession: () => session,
+      getSession: () => session,
+      updateSession: vi.fn(),
+    } as unknown as CoworkStore;
+    let finishRun!: () => void;
+    const runPending = new Promise<void>(resolve => {
+      finishRun = resolve;
+    });
+    const startSession = vi.fn(async (_sessionId: string, prompt: string) => {
+      session.messages.push({ type: 'user', content: prompt });
+      await runPending;
+      session.messages.push({ type: 'assistant', content: 'Detached task completed' });
+      session.status = 'completed';
+    });
+    const stopSession = vi.fn(async () => undefined);
+    const routerEvents = new EventEmitter();
+    const router = {
+      on: routerEvents.on.bind(routerEvents),
+      off: routerEvents.off.bind(routerEvents),
+      startSession,
+      continueSession: vi.fn(),
+      stopSession,
+    } as unknown as CoworkEngineRouter;
+    const server = new MulticaBridgeServer({
+      userDataPath,
+      getEngineManager: () => ({}) as OpenClawEngineManager,
+      getCoworkStore: () => coworkStore,
+      getCoworkEngineRouter: () => router,
+      ensureCoworkRuntime: async () => ({ phase: 'running' }),
+      getDatabase: () => db,
+      onSessionsChanged: vi.fn(),
+    });
+
+    await server.start();
+    try {
+      const metadata = JSON.parse(
+        fs.readFileSync(path.join(userDataPath, 'multica', MULTICA_BRIDGE_METADATA_FILE), 'utf8'),
+      ) as MulticaBridgeMetadata;
+      const socket = net.createConnection(metadata.endpoint);
+      await new Promise<void>((resolve, reject) => {
+        socket.once('connect', () => {
+          socket.write(
+            encodeBridgeMessage({
+              type: 'request',
+              version: MULTICA_BRIDGE_PROTOCOL_VERSION,
+              requestId: 'detached-agent-request',
+              token: metadata.token,
+              argv: [
+                'agent',
+                '--local',
+                '--json',
+                '--session-id',
+                'multica-detached',
+                '--agent',
+                'main',
+                '--message',
+                'finish after disconnect',
+              ],
+              cwd: userDataPath,
+              env: {},
+            }),
+          );
+        });
+        vi.waitFor(() => expect(startSession).toHaveBeenCalledOnce()).then(() => resolve(), reject);
+      });
+
+      socket.destroy();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      expect(stopSession).not.toHaveBeenCalled();
+
+      finishRun();
+      await vi.waitFor(() => {
+        const row = db
+          .prepare(
+            "SELECT status FROM cowork_external_sessions WHERE source = 'multica' AND external_session_key = ?",
+          )
+          .get('multica-detached') as { status: string } | undefined;
+        expect(row?.status).toBe('completed');
+      });
+      expect(stopSession).not.toHaveBeenCalled();
+    } finally {
+      await server.stop();
+      db.close();
     }
   });
 

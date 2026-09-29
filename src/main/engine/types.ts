@@ -1,4 +1,5 @@
 import type { OpenClawSkillSource } from '../../shared/plugins/skills';
+import type { GoalExecutionSnapshot } from '../../shared/sessionGoal';
 import type { CoworkMessage } from '../data/coworkStore';
 
 export type CoworkAgentEngine = 'openclaw';
@@ -229,4 +230,6 @@ export interface CoworkRuntime {
       }
     >
   >;
+  /** Read the current managed Goal execution state for a session. */
+  getGoalExecution?(sessionId: string): GoalExecutionSnapshot | null;
 }

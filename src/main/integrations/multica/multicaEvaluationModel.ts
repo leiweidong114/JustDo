@@ -75,10 +75,7 @@ export function addMulticaEvaluationModel(
   };
 }
 
-export function removeMulticaEvaluationModel(
-  current: AppConfig,
-  providerId: string,
-): AppConfig {
+export function removeMulticaEvaluationModel(current: AppConfig, providerId: string): AppConfig {
   const providers = { ...(current.providers ?? {}) };
   const provider = providers[providerId];
   if (
@@ -90,6 +87,13 @@ export function removeMulticaEvaluationModel(
     delete providers[providerId];
   }
   return { ...current, providers };
+}
+
+export function removeMulticaEvaluationModels(
+  current: AppConfig,
+  providerIds: readonly string[],
+): AppConfig {
+  return providerIds.reduce(removeMulticaEvaluationModel, current);
 }
 
 export function removeAllMulticaEvaluationModels(current: AppConfig): AppConfig {

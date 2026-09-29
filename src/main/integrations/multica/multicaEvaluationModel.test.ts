@@ -4,6 +4,7 @@ import {
   addMulticaEvaluationModel,
   removeAllMulticaEvaluationModels,
   removeMulticaEvaluationModel,
+  removeMulticaEvaluationModels,
 } from './multicaEvaluationModel';
 
 describe('Multica evaluation model provisioning', () => {
@@ -39,21 +40,41 @@ describe('Multica evaluation model provisioning', () => {
 
   test('rejects unsupported protocols and credential-bearing URLs', () => {
     expect(() =>
-      addMulticaEvaluationModel({}, {
-        requestId: 'evaluation-1',
-        model: 'model',
-        apiBase: 'https://user:password@example.com/v1',
-        apiKey: 'key',
-      }),
+      addMulticaEvaluationModel(
+        {},
+        {
+          requestId: 'evaluation-1',
+          model: 'model',
+          apiBase: 'https://user:password@example.com/v1',
+          apiKey: 'key',
+        },
+      ),
     ).toThrow('without credentials');
     expect(() =>
-      addMulticaEvaluationModel({}, {
-        requestId: 'evaluation-1',
-        model: 'model',
-        apiBase: 'https://example.com/v1',
-        apiKey: 'key',
-        protocol: 'anthropic_messages',
-      }),
+      addMulticaEvaluationModel(
+        {},
+        {
+          requestId: 'evaluation-1',
+          model: 'model',
+          apiBase: 'https://example.com/v1',
+          apiKey: 'key',
+          protocol: 'anthropic_messages',
+        },
+      ),
     ).toThrow('does not support');
+  });
+
+  test('removes multiple request-scoped providers in one config update', () => {
+    const config = {
+      providers: {
+        configured: { enabled: true },
+        agent_eval_one: { managedBy: 'agent-eval-multica' },
+        agent_eval_two: { managedBy: 'agent-eval-multica' },
+      },
+    };
+
+    expect(
+      removeMulticaEvaluationModels(config, ['agent_eval_one', 'agent_eval_two']).providers,
+    ).toEqual({ configured: { enabled: true } });
   });
 });
